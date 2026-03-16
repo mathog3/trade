@@ -19,23 +19,23 @@ htf_slow      = input.int(50,       "HTF Slow EMA",                  minval=20, 
 grp3 = "RSI Filter"
 use_rsi       = input.bool(true,    "Enable RSI Filter",             group=grp3)
 rsi_len       = input.int(14,       "RSI Length",                    group=grp3)
-rsi_buy_max   = input.int(40,       "Max RSI for BUY",               minval=20,  maxval=60,               group=grp3)
-rsi_sell_min  = input.int(60,       "Min RSI for SELL",              minval=40,  maxval=80,               group=grp3)
+rsi_buy_max   = input.int(45,       "Max RSI for BUY",               minval=20,  maxval=60,               group=grp3)
+rsi_sell_min  = input.int(55,       "Min RSI for SELL",              minval=40,  maxval=80,               group=grp3)
 rsi_ext_buy   = input.int(30,       "Strong BUY (RSI <)",            minval=10,  maxval=45,               group=grp3)
 rsi_ext_sell  = input.int(70,       "Strong SELL (RSI >)",           minval=55,  maxval=90,               group=grp3)
 
 grp4 = "ADX Trend Strength"
-use_adx       = input.bool(true,    "Enable ADX Filter",             group=grp4)
+use_adx       = input.bool(false,   "Enable ADX Filter",             group=grp4)
 adx_len       = input.int(14,       "ADX Length",                    group=grp4)
-adx_min       = input.int(20,       "Min ADX Value",                 minval=10,  maxval=40,               group=grp4)
+adx_min       = input.int(18,       "Min ADX Value",                 minval=10,  maxval=40,               group=grp4)
 
 grp5 = "Swing Structure Filter"
-use_swing     = input.bool(true,    "Signal at Swing Extreme",       group=grp5)
+use_swing     = input.bool(false,   "Signal at Swing Extreme",       group=grp5)
 swing_bars    = input.int(10,       "Swing Lookback (bars)",         minval=3,   maxval=30,               group=grp5)
-swing_tol_atr = input.float(0.5,    "Swing Tolerance (x ATR)",       minval=0.1, maxval=2.0, step=0.1,    group=grp5)
+swing_tol_atr = input.float(1.0,    "Swing Tolerance (x ATR)",       minval=0.1, maxval=2.0, step=0.1,    group=grp5)
 
 grp6 = "Cooldown"
-cooldown_bars = input.int(20,       "Min Bars Between Signals",      minval=4,   maxval=100,              group=grp6)
+cooldown_bars = input.int(12,       "Min Bars Between Signals",      minval=4,   maxval=100,              group=grp6)
 
 grp7 = "Session Filter"
 use_session   = input.bool(true,    "Enable Session Filter",         group=grp7)
@@ -52,7 +52,7 @@ sl_atr_mult   = input.float(1.2,    "SL ATR Multiplier",             minval=0.5,
 sl_buffer     = input.float(0.00015,"SL Min Buffer",                 minval=0.0, step=0.00005,            group=grp9)
 tp1_rr        = input.float(1.5,    "TP1 Risk:Reward",               minval=1.0, maxval=8.0,  step=0.1,   group=grp9)
 tp2_rr        = input.float(2.5,    "TP2 Risk:Reward",               minval=1.0, maxval=10.0, step=0.1,   group=grp9)
-show_tp_bars  = input.int(0,        "Show TP/SL lines N bars (0=off)",minval=0,  maxval=100,              group=grp9)
+show_tp_bars  = input.int(30,       "Show TP/SL lines N bars (0=off)",minval=0,  maxval=100,              group=grp9)
 
 grp10 = "Display"
 show_sma200   = input.bool(true,    "Show SMA 200",                  group=grp10)
