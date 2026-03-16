@@ -172,7 +172,51 @@ if sell_signal
     t_sbar  := bar_index
     t_buy   := false
 
-show_lines = not na(t_sbar) and (bar_index - t_sbar) <= line_bars
+// ─── LIGNES SL/TP avec labels ──────────────────────────────────────
+var line  ln_sl    = na
+var line  ln_entry = na
+var line  ln_tp1   = na
+var line  ln_tp2   = na
+var label lb_sl    = na
+var label lb_entry = na
+var label lb_tp1   = na
+var label lb_tp2   = na
+
+f_del_lines() =>
+    if not na(ln_sl)    line.delete(ln_sl)
+    if not na(ln_entry) line.delete(ln_entry)
+    if not na(ln_tp1)   line.delete(ln_tp1)
+    if not na(ln_tp2)   line.delete(ln_tp2)
+    if not na(lb_sl)    label.delete(lb_sl)
+    if not na(lb_entry) label.delete(lb_entry)
+    if not na(lb_tp1)   label.delete(lb_tp1)
+    if not na(lb_tp2)   label.delete(lb_tp2)
+
+if buy_signal or sell_signal
+    f_del_lines()
+    x2 = bar_index + line_bars
+
+    _sl  = buy_signal ? buy_sl   : sell_sl
+    _en  = close
+    _tp1 = buy_signal ? buy_tp1  : sell_tp1
+    _tp2 = buy_signal ? buy_tp2  : sell_tp2
+
+    ln_sl    := line.new(bar_index, _sl,  x2, _sl,  color=color.new(color.red,    0), width=2, style=line.style_dashed,  extend=extend.none)
+    ln_entry := line.new(bar_index, _en,  x2, _en,  color=color.new(color.white,  0), width=2, style=line.style_solid,   extend=extend.none)
+    ln_tp1   := line.new(bar_index, _tp1, x2, _tp1, color=color.new(color.lime,   0), width=2, style=line.style_dashed,  extend=extend.none)
+    ln_tp2   := line.new(bar_index, _tp2, x2, _tp2, color=color.new(color.green,  0), width=1, style=line.style_dotted,  extend=extend.none)
+
+    _rr1 = math.round(math.abs(_tp1 - _en) / math.abs(_en - _sl), 1)
+    _rr2 = math.round(math.abs(_tp2 - _en) / math.abs(_en - _sl), 1)
+
+    lb_sl    := label.new(x2, _sl,  "❌ SL  " + str.tostring(_sl,  "#.#####"),               color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    lb_entry := label.new(x2, _en,  "▶ ENTRY  " + str.tostring(_en, "#.#####"),              color=color.new(color.gray,  10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    lb_tp1   := label.new(x2, _tp1, "✅ TP1  " + str.tostring(_tp1, "#.#####") + "  (" + str.tostring(_rr1) + "R)", color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    lb_tp2   := label.new(x2, _tp2, "🎯 TP2  " + str.tostring(_tp2, "#.#####") + "  (" + str.tostring(_rr2) + "R)", color=color.new(color.green, 10), textcolor=color.black, style=label.style_label_left, size=size.small)
+
+// Expire les lignes au-delà de line_bars
+if not na(t_sbar) and (bar_index - t_sbar) > line_bars
+    f_del_lines()
 
 // ─── VISUEL ───────────────────────────────────────────────────────
 // Signaux
@@ -184,12 +228,6 @@ plotshape(sell_signal, "SELL", shape.labeldown, location.abovebar,
 // Niveaux S/R actifs (fade = waiting, bright = ready)
 plot(s_state >= 1 ? s_lvl : na, "Support",    color.new(color.lime, s_state == 2 ? 10 : 75), 1, plot.style_linebr)
 plot(r_state >= 1 ? r_lvl : na, "Résistance", color.new(color.red,  r_state == 2 ? 10 : 75), 1, plot.style_linebr)
-
-// SL / TP dernier signal
-plot(show_lines ? t_sl    : na, "SL",    color.new(color.red,   0),  2, plot.style_linebr)
-plot(show_lines ? t_tp1   : na, "TP1",   color.new(color.lime,  0),  2, plot.style_linebr)
-plot(show_lines ? t_tp2   : na, "TP2",   color.new(color.green, 30), 1, plot.style_linebr)
-plot(show_lines ? t_entry : na, "Entry", color.new(color.white, 60), 1, plot.style_linebr)
 
 // SMA 200
 plot(sma200, "SMA 200", color.new(color.yellow, 25), 2)
