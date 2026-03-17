@@ -165,17 +165,19 @@ while j < array.size(sfvg_age)
 price_in_bull_fvg = false
 price_in_bear_fvg = false
 
-for k = 0 to array.size(bfvg_top) - 1
-    bot_k = array.get(bfvg_bot, k)
-    top_k = array.get(bfvg_top, k)
-    if low <= top_k and close >= bot_k
-        price_in_bull_fvg := true
+if array.size(bfvg_top) > 0
+    for k = 0 to array.size(bfvg_top) - 1
+        bot_k = array.get(bfvg_bot, k)
+        top_k = array.get(bfvg_top, k)
+        if low <= top_k and close >= bot_k
+            price_in_bull_fvg := true
 
-for k = 0 to array.size(sfvg_top) - 1
-    bot_k = array.get(sfvg_bot, k)
-    top_k = array.get(sfvg_top, k)
-    if high >= bot_k and close <= top_k
-        price_in_bear_fvg := true
+if array.size(sfvg_top) > 0
+    for k = 0 to array.size(sfvg_top) - 1
+        bot_k = array.get(sfvg_bot, k)
+        top_k = array.get(sfvg_top, k)
+        if high >= bot_k and close <= top_k
+            price_in_bear_fvg := true
 
 // Affichage FVG (boîtes)
 if show_fvg and bull_fvg_ok
@@ -254,19 +256,21 @@ while jj < array.size(srej_age)
 price_in_bull_rej = false
 price_in_bear_rej = false
 
-for k = 0 to array.size(brej_top) - 1
-    bot_k = array.get(brej_bot, k)
-    top_k = array.get(brej_top, k)
-    age_k = bar_index - array.get(brej_age, k)
-    if age_k >= 3 and low <= top_k and close >= bot_k  // age >= 3 = pas la bougie elle-même
-        price_in_bull_rej := true
+if array.size(brej_top) > 0
+    for k = 0 to array.size(brej_top) - 1
+        bot_k = array.get(brej_bot, k)
+        top_k = array.get(brej_top, k)
+        age_k = bar_index - array.get(brej_age, k)
+        if age_k >= 3 and low <= top_k and close >= bot_k  // age >= 3 = pas la bougie elle-même
+            price_in_bull_rej := true
 
-for k = 0 to array.size(srej_top) - 1
-    bot_k = array.get(srej_bot, k)
-    top_k = array.get(srej_top, k)
-    age_k = bar_index - array.get(srej_age, k)
-    if age_k >= 3 and high >= bot_k and close <= top_k
-        price_in_bear_rej := true
+if array.size(srej_top) > 0
+    for k = 0 to array.size(srej_top) - 1
+        bot_k = array.get(srej_bot, k)
+        top_k = array.get(srej_top, k)
+        age_k = bar_index - array.get(srej_age, k)
+        if age_k >= 3 and high >= bot_k and close <= top_k
+            price_in_bear_rej := true
 
 // Affichage Rejection Zones
 if show_rej and impulse_up
