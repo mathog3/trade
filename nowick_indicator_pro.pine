@@ -2,52 +2,59 @@
 indicator("Nowick — Brad.fx", overlay=true, max_bars_back=500)
 
 // ─── INPUTS ───────────────────────────────────────────────────────
-wick_pct     = input.float(5.0, "Mèche max (% corps)",  minval=0.0, maxval=25.0, step=0.5)
-retest_bars  = input.int(8,     "Fenêtre retest (barres)", minval=1, maxval=30)
-swing_len    = input.int(5,     "Swing length",          minval=2,  maxval=20)
-sl_buf       = input.float(0.3, "SL buffer (× ATR)",    minval=0.0, maxval=2.0, step=0.1)
-tp1_rr       = input.float(2.0, "TP1 (RR)",             minval=0.5, maxval=10.0, step=0.5)
-tp2_rr       = input.float(3.0, "TP2 (RR)",             minval=0.5, maxval=10.0, step=0.5)
-use_sess     = input.bool(true, "Filtre session (07-17 UTC)")
+wick_pct    = input.float(5.0, "Mèche max (% corps)",    minval=0.0, maxval=25.0, step=0.5,
+              tooltip="0% = open = low exactement. 5% = légère tolérance.")
+bos_len     = input.int(50,   "BOS lookback (barres)",   minval=10,  maxval=200,
+              tooltip="50 barres M15 = 12h. Augmente pour moins de signaux mais plus forts.")
+retest_bars = input.int(10,   "Fenêtre retest (barres)", minval=3,   maxval=30)
+sl_buf      = input.float(0.3,"SL buffer (× ATR)",       minval=0.0, maxval=2.0,  step=0.1)
+tp1_rr      = input.float(2.0,"TP1 (RR)",                minval=0.5, maxval=10.0, step=0.5)
+tp2_rr      = input.float(3.0,"TP2 (RR)",                minval=0.5, maxval=10.0, step=0.5)
+use_sess    = input.bool(true,"Session 07-17 UTC")
 
-// ─── CALCULS ──────────────────────────────────────────────────────
+// ─── BASE ─────────────────────────────────────────────────────────
 atr     = ta.atr(14)
 body    = math.abs(close - open)
-thresh  = body * (wick_pct / 100.0)
-
-// ─── NOWICK ───────────────────────────────────────────────────────
-// Bull : bougie verte, mèche basse ≈ 0 (open ≈ low)
-// Bear : bougie rouge, mèche haute ≈ 0 (open ≈ high)
 dn_wick = math.min(open, close) - low
 up_wick = high - math.max(open, close)
+thresh  = body * (wick_pct / 100.0)
 big_bod = body >= atr * 0.4
 
+// ─── NOWICK ───────────────────────────────────────────────────────
+// Bougie VERTE + mèche basse ≈ 0 → support au low
+// Bougie ROUGE + mèche haute ≈ 0 → résistance au high
 bull_nw = close > open and dn_wick <= thresh and big_bod
 bear_nw = close < open and up_wick <= thresh and big_bod
 
-// ─── BOS (structure) ──────────────────────────────────────────────
-ph = ta.pivothigh(high, swing_len, swing_len)
-pl = ta.pivotlow(low,   swing_len, swing_len)
+// ─── TREND via BOS ────────────────────────────────────────────────
+// BOS haussier  = close dépasse le plus haut des N dernières barres
+// BOS baissier  = close passe sous le plus bas des N dernières barres
+// [1] = on exclut la barre courante (évite les faux déclenchements)
+bos_hi = ta.highest(high, bos_len)[1]
+bos_lo = ta.lowest(low,   bos_len)[1]
 
-var float last_ph = na
-var float last_pl = na
-if not na(ph) then last_ph := ph
-if not na(pl) then last_pl := pl
+var int   trend   = 0
+var float hi_bull = na   // plus haut depuis le dernier BOS bull
+var float lo_bear = na   // plus bas depuis le dernier BOS bear
 
-bos_bull = not na(last_ph) and close > last_ph + atr * 0.1 and close[1] <= last_ph
-bos_bear = not na(last_pl) and close < last_pl - atr * 0.1 and close[1] >= last_pl
+if close > bos_hi
+    trend   := 1
+    hi_bull := high
+else if trend == 1
+    hi_bull := math.max(hi_bull, high)
 
-var int trend = 0
-if bos_bull then trend := 1
-if bos_bear then trend := -1
+if close < bos_lo
+    trend   := -1
+    lo_bear := low
+else if trend == -1
+    lo_bear := math.min(lo_bear, low)
 
-// ─── FILTRE SESSION ───────────────────────────────────────────────
-sess_ok = not use_sess or (hour(time, "UTC") >= 7 and hour(time, "UTC") < 17)
+// Pullback : le nowick doit se former AU MOINS 1×ATR sous le dernier high (bull)
+// ou au-dessus du dernier low (bear) → on achète le pullback, pas le top
+in_pb_buy  = trend == 1  and not na(hi_bull) and close <= hi_bull - atr
+in_pb_sell = trend == -1 and not na(lo_bear) and close >= lo_bear  + atr
 
-// ─── NOWICK VALIDE (trend + pullback) ─────────────────────────────
-in_pb_buy  = trend == 1 and not na(last_ph) and close < last_ph
-in_pb_sell = trend == -1 and not na(last_pl) and close > last_pl
-
+// ─── NOWICK VALIDE ────────────────────────────────────────────────
 valid_bull = bull_nw and in_pb_buy
 valid_bear = bear_nw and in_pb_sell
 
@@ -60,7 +67,6 @@ var int   nw_sel_b  = na
 if valid_bull
     nw_buy_lo := low
     nw_buy_b  := bar_index
-
 if valid_bear
     nw_sel_hi := high
     nw_sel_b  := bar_index
@@ -72,7 +78,7 @@ age_sell = na(nw_sel_b) ? na : bar_index - nw_sel_b
 if not na(age_buy)  and age_buy  > retest_bars then nw_buy_lo := na, nw_buy_b  := na
 if not na(age_sell) and age_sell > retest_bars then nw_sel_hi := na, nw_sel_b  := na
 
-// Invalidation (close casse le niveau)
+// Invalidation : close casse le niveau → setup annulé
 if not na(nw_buy_lo) and close < nw_buy_lo - atr * 0.05 then nw_buy_lo := na, nw_buy_b := na
 if not na(nw_sel_hi) and close > nw_sel_hi + atr * 0.05 then nw_sel_hi := na, nw_sel_b := na
 
@@ -85,6 +91,9 @@ retest_buy  = not na(nw_buy_lo) and age_buy  > 0 and age_buy  <= retest_bars
 retest_sell = not na(nw_sel_hi) and age_sell > 0 and age_sell <= retest_bars
               and high >= nw_sel_hi - tol and close <= nw_sel_hi
 
+// ─── SESSION ──────────────────────────────────────────────────────
+sess_ok = not use_sess or (hour(time, "UTC") >= 7 and hour(time, "UTC") < 17)
+
 // ─── SIGNAUX ──────────────────────────────────────────────────────
 buy_sig  = retest_buy  and sess_ok
 sell_sig = retest_sell and sess_ok
@@ -92,24 +101,22 @@ sell_sig = retest_sell and sess_ok
 // ─── SL / TP ──────────────────────────────────────────────────────
 buy_sl   = buy_sig  ? math.min(nw_buy_lo, low)  - atr * sl_buf : na
 sell_sl  = sell_sig ? math.max(nw_sel_hi, high) + atr * sl_buf : na
-
 buy_risk  = not na(buy_sl)  ? close - buy_sl  : na
 sell_risk = not na(sell_sl) ? sell_sl - close : na
+buy_tp1   = not na(buy_risk)  ? close + buy_risk  * tp1_rr : na
+buy_tp2   = not na(buy_risk)  ? close + buy_risk  * tp2_rr : na
+sell_tp1  = not na(sell_risk) ? close - sell_risk * tp1_rr : na
+sell_tp2  = not na(sell_risk) ? close - sell_risk * tp2_rr : na
 
-buy_tp1  = not na(buy_risk)  ? close + buy_risk  * tp1_rr : na
-buy_tp2  = not na(buy_risk)  ? close + buy_risk  * tp2_rr : na
-sell_tp1 = not na(sell_risk) ? close - sell_risk * tp1_rr : na
-sell_tp2 = not na(sell_risk) ? close - sell_risk * tp2_rr : na
-
-// Consommer le niveau
+// Consommer le niveau après signal
 if buy_sig  then nw_buy_lo := na, nw_buy_b  := na
 if sell_sig then nw_sel_hi := na, nw_sel_b  := na
 
 // ─── LIGNES SL/TP ─────────────────────────────────────────────────
-var line ln_sl  = na
-var line ln_en  = na
-var line ln_tp1 = na
-var line ln_tp2 = na
+var line  ln_sl  = na
+var line  ln_en  = na
+var line  ln_tp1 = na
+var line  ln_tp2 = na
 var label lb_sl  = na
 var label lb_tp1 = na
 var label lb_tp2 = na
@@ -128,18 +135,18 @@ if buy_sig or sell_sig
     _tp1 = buy_sig ? buy_tp1  : sell_tp1
     _tp2 = buy_sig ? buy_tp2  : sell_tp2
 
-    ln_sl  := line.new(bar_index, _sl,  x2, _sl,  color=color.new(color.red,   0), width=2, style=line.style_dashed)
-    ln_en  := line.new(bar_index, close,x2, close, color=color.new(color.white, 40), width=1)
-    ln_tp1 := line.new(bar_index, _tp1, x2, _tp1, color=color.new(color.lime,  0), width=2, style=line.style_dashed)
-    ln_tp2 := line.new(bar_index, _tp2, x2, _tp2, color=color.new(color.green, 0), width=1, style=line.style_dotted)
+    ln_sl  := line.new(bar_index, _sl,   x2, _sl,   color=color.new(color.red,   0), width=2, style=line.style_dashed)
+    ln_en  := line.new(bar_index, close, x2, close,  color=color.new(color.white,40), width=1)
+    ln_tp1 := line.new(bar_index, _tp1,  x2, _tp1,  color=color.new(color.lime,  0), width=2, style=line.style_dashed)
+    ln_tp2 := line.new(bar_index, _tp2,  x2, _tp2,  color=color.new(color.green, 0), width=1, style=line.style_dotted)
 
-    lb_sl  := label.new(x2, _sl,  "SL",  color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
-    lb_tp1 := label.new(x2, _tp1, "TP1", color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
-    lb_tp2 := label.new(x2, _tp2, "TP2", color=color.new(color.green, 10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    lb_sl  := label.new(x2, _sl,  "SL",  color=color.new(color.red,  10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    lb_tp1 := label.new(x2, _tp1, "TP1", color=color.new(color.lime, 10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    lb_tp2 := label.new(x2, _tp2, "TP2", color=color.new(color.green,10), textcolor=color.black, style=label.style_label_left, size=size.small)
 
-// ─── SIGNAUX VISUELS ──────────────────────────────────────────────
-plotshape(buy_sig,  "BUY",  shape.labelup,   location.belowbar, color.new(color.green, 0), text="BUY",  textcolor=color.white, size=size.normal)
-plotshape(sell_sig, "SELL", shape.labeldown, location.abovebar, color.new(color.red,   0), text="SELL", textcolor=color.white, size=size.normal)
+// ─── VISUELS ──────────────────────────────────────────────────────
+plotshape(buy_sig,  "BUY",  shape.labelup,   location.belowbar, color.new(color.green,0), text="BUY",  textcolor=color.white, size=size.normal)
+plotshape(sell_sig, "SELL", shape.labeldown, location.abovebar, color.new(color.red,  0), text="SELL", textcolor=color.white, size=size.normal)
 
 // ─── ALERTES ──────────────────────────────────────────────────────
 alertcondition(buy_sig,  "ENTRÉE BUY",  "Nowick BUY — retest tenu")
