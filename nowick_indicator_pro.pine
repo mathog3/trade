@@ -2,8 +2,8 @@
 indicator("Nowick — Brad.fx", overlay=true, max_bars_back=500)
 
 // ─── INPUTS ───────────────────────────────────────────────────────
-wick_pct    = input.float(1.0, "Mèche max (% corps)",    minval=0.0, maxval=5.0,  step=0.1,
-              tooltip="Brad.fx: quasi-zéro. 1% = très strict, peu de signaux mais forts.")
+wick_pct    = input.float(0.0, "Mèche max (% corps)",    minval=0.0, maxval=5.0,  step=0.1,
+              tooltip="0% = zéro wick absolu (Brad.fx). Augmente légèrement si trop peu de signaux.")
 bos_len     = input.int(50,   "BOS lookback (barres)",   minval=20,  maxval=200)
 retest_bars = input.int(8,    "Fenêtre retest (barres)", minval=3,   maxval=15)
 sl_buf      = input.float(0.3,"SL buffer (× ATR)",       minval=0.1, maxval=1.0,  step=0.1,
@@ -150,6 +150,9 @@ if sell_sig
     label.new(bar_index, high, "SELL",
               yloc=yloc.price, color=color.new(color.red,0),
               textcolor=color.white, style=label.style_label_down, size=size.normal)
+
+// ─── PLOT REQUIS PAR TRADINGVIEW ──────────────────────────────────
+plot(na)
 
 // ─── ALERTES ──────────────────────────────────────────────────────
 alertcondition(buy_sig,  "ENTRÉE BUY",  "Nowick BUY — retest tenu — 1:2")
