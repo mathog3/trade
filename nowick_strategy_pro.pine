@@ -1,20 +1,24 @@
 // ============================================================================
-// NOWICK STRATEGY v7.0 — NW Pure | Brad.fx
-// M15 Forex | SMA200 trend + Nowick + Retest
+// NOWICK STRATEGY v7.1 — NW Quality | Brad.fx
+// M15 Forex | SMA200 + Nowick + Retest directionnel
 //
-// PROBLÈME v6 résolu :
-//  - wick_pct était 5% (trop strict → quasi aucun signal en forex)
-//  - BOS + pullback + nowick + retest = 4 conditions en chaîne → trop rare
+// v7.0 → v7.1 : PROBLÈME = WR 31%, 808 trades (trop)
 //
-// v7 — SIMPLIFIÉ ET EFFICACE :
-//  1. Trend : SMA200 (simple, robuste)
-//  2. Nowick candle : mèche ≤ 15% du corps (réaliste)
-//  3. Retest : prix revient au niveau, bougie ferme du bon côté
-//  4. Entrée au close, SL sous le low du nowick, TP 2:1
+// ROOT CAUSE : sans filtre de direction sur le retest, n'importe quelle
+// bougie qui effleure le niveau déclenche un signal. Aucun momentum prouvé.
+//
+// FIXES v7.1 :
+//  1. Retest = bougie DOIT fermer dans la direction du trade
+//     (bull candle pour BUY, bear candle pour SELL) — le filtre WR #1
+//  2. Filtre rejection ON par défaut (wick visible sur retest)
+//  3. wick_pct : 15% → 12% (moins de nowick, plus qualitatifs)
+//  4. Cooldown : 10 → 15 barres
+//  5. Session : 6-20 UTC (Londres + NY = liquidité = meilleurs retests)
+//  6. retest_tol : 0.4 → 0.3 (retest doit être proche du niveau)
 // ============================================================================
 
 //@version=5
-strategy("Nowick v7.0 — NW Pure",
+strategy("Nowick v7.1 — NW Quality",
          overlay=true,
          default_qty_type=strategy.percent_of_equity,
          default_qty_value=1,
@@ -30,52 +34,51 @@ strategy("Nowick v7.0 — NW Pure",
 // ============================================================================
 
 g1 = "── Nowick ──"
-wick_pct     = input.float(15.0, "Mèche max (% du corps)",
+wick_pct     = input.float(12.0, "Mèche max (% du corps)",
                minval=1.0, maxval=50.0, step=1.0, group=g1,
-               tooltip="CLEF : 15% = wick bas ≤ 15% du corps. Trop bas = trop rare. 15-20% = optimal.")
+               tooltip="12% = wick ≤ 12% du corps. Plus haut = plus de trades mais moins qualitatifs.")
 min_body_atr = input.float(0.3,  "Corps min (× ATR)",
-               minval=0.1, maxval=2.0,  step=0.1, group=g1,
-               tooltip="Corps doit valoir au moins 0.3 × ATR. Filtre les petites bougies sans momentum.")
+               minval=0.1, maxval=2.0, step=0.1, group=g1)
 atr_len      = input.int(14,     "ATR length", minval=5, maxval=50, group=g1)
 
 g2 = "── Retest ──"
-retest_bars  = input.int(15,    "Fenêtre retest (barres)",
-               minval=1, maxval=50, group=g2,
-               tooltip="Nombre de barres max pour que le retest arrive après le nowick.")
-retest_tol   = input.float(0.4, "Tolérance sweep (× ATR)",
-               minval=0.0, maxval=2.0, step=0.05, group=g2,
-               tooltip="Tolérance si le prix dépasse légèrement le niveau (wick sweep).")
+retest_bars  = input.int(15,    "Fenêtre retest (barres)", minval=1, maxval=50, group=g2,
+               tooltip="Barres max après le nowick pour que le retest arrive.")
+retest_tol   = input.float(0.3, "Tolérance sweep (× ATR)", minval=0.0, maxval=1.0, step=0.05, group=g2,
+               tooltip="Le low du retest doit être dans 0.3×ATR du niveau nowick.")
+req_dir      = input.bool(true,  "Bougie de retest dans le bon sens ★",
+               group=g2, tooltip="★ FILTRE WR CLÉ : BUY = bougie verte sur le retest. SELL = bougie rouge. Prouve que le niveau tient.")
 
-g3 = "── Trend ──"
-use_sma   = input.bool(true,  "Filtre SMA 200",
-            group=g3, tooltip="BUY seulement si close > SMA200. SELL si close < SMA200.")
-sma_len   = input.int(200,    "SMA length", minval=20, maxval=500, group=g3)
-use_bos   = input.bool(false, "Filtre BOS supplémentaire",
-            group=g3, tooltip="Désactivé par défaut. Active pour exiger un Break of Structure (filtre avancé, réduit les trades).")
-swing_len = input.int(3,      "Swing length (BOS)", minval=2, maxval=20, group=g3)
+g3 = "── Filtre Rejection ──"
+use_rej  = input.bool(true,  "Wick de rejet au retest", group=g3,
+           tooltip="Le retest doit montrer un wick visible (sweep du niveau + rebond).")
+rej_min  = input.float(0.15, "Wick rejet min (× corps)", minval=0.05, maxval=1.0, step=0.05, group=g3)
 
-g4 = "── Filtre Rejection ──"
-use_rej  = input.bool(false, "Wick de rejet au retest",
-           group=g4, tooltip="La bougie de retest doit montrer un wick visible. Active pour filtrer les entrées sans momentum.")
-rej_min  = input.float(0.2,  "Wick rejet min (× corps)",
-           minval=0.05, maxval=1.0, step=0.05, group=g4)
+g4 = "── Trend ──"
+use_sma   = input.bool(true,  "Filtre SMA 200", group=g4)
+sma_len   = input.int(200,    "SMA length", minval=20, maxval=500, group=g4)
+use_bos   = input.bool(false, "Filtre BOS (avancé)", group=g4,
+            tooltip="Désactivé par défaut. Active pour exiger un Break of Structure.")
+swing_len = input.int(3, "Swing length (BOS)", minval=2, maxval=20, group=g4)
 
 g5 = "── Session ──"
-use_sess   = input.bool(true, "Filtre session UTC", group=g5)
-sess_start = input.int(0,     "Début UTC",  minval=0, maxval=23, group=g5)
-sess_end   = input.int(20,    "Fin UTC",    minval=1, maxval=23, group=g5)
-cooldown_b = input.int(10,    "Cooldown (barres)", minval=1, maxval=100, group=g5)
+use_sess   = input.bool(true, "Filtre session UTC", group=g5,
+             tooltip="6-20 UTC = Londres + NY. Meilleure liquidité = meilleurs retests.")
+sess_start = input.int(6,  "Début UTC", minval=0, maxval=23, group=g5)
+sess_end   = input.int(20, "Fin UTC",   minval=1, maxval=23, group=g5)
+cooldown_b = input.int(15, "Cooldown (barres)", minval=1, maxval=100, group=g5,
+             tooltip="15 barres = 3h45 sur M15. Évite le sur-trading.")
 
 g6 = "── SL / TP ──"
-sl_buf    = input.float(0.3, "SL buffer (× ATR)",    minval=0.0, maxval=2.0,  step=0.1,  group=g6)
-tp_rr     = input.float(2.0, "TP1 (RR)",              minval=0.5, maxval=10.0, step=0.5,  group=g6)
-use_split = input.bool(true, "Split TP1/TP2",         group=g6,
-            tooltip="50% sort au TP1, 50% reste avec SL à breakeven jusqu'au TP2.")
-tp2_rr    = input.float(3.0, "TP2 (RR) — si split",  minval=0.5, maxval=15.0, step=0.5,  group=g6)
+sl_buf    = input.float(0.3, "SL buffer (× ATR)",     minval=0.0, maxval=2.0,  step=0.1,  group=g6)
+tp_rr     = input.float(2.0, "TP1 (RR)",               minval=0.5, maxval=10.0, step=0.5,  group=g6)
+use_split = input.bool(true, "Split TP1/TP2 (50/50)",  group=g6,
+            tooltip="50% sort au TP1, 50% reste avec SL à BE jusqu'au TP2.")
+tp2_rr    = input.float(3.0, "TP2 (RR) — si split",   minval=0.5, maxval=15.0, step=0.5,  group=g6)
 
 g7 = "── Affichage ──"
-show_sma    = input.bool(true,  "SMA 200", group=g7)
-show_levels = input.bool(true,  "SL/TP",   group=g7)
+show_sma    = input.bool(true, "SMA 200", group=g7)
+show_levels = input.bool(true, "SL/TP",   group=g7)
 
 // ============================================================================
 // CALCULS
@@ -83,29 +86,23 @@ show_levels = input.bool(true,  "SL/TP",   group=g7)
 atr    = ta.atr(atr_len)
 sma200 = ta.sma(close, sma_len)
 
-// Anatomie bougie
 body    = math.abs(close - open)
 up_wick = high - math.max(open, close)
 dn_wick = math.min(open, close) - low
 big_bod = body >= atr * min_body_atr
+thresh  = body * (wick_pct / 100.0)
 
-// Seuil mèche : wick ≤ X% du corps
-thresh = body * (wick_pct / 100.0)
-
-// ── DÉTECTION NOWICK ──────────────────────────────────────────────
-// Bull nowick : bougie verte, mèche BAS ≈ 0 (pas de rejet vers le bas)
-// → les sellers n'ont pas réussi → le low est un niveau de support fort
+// ── DÉTECTION NOWICK ──────────────────────────────────────────────────────────
+// Bull nowick : bougie verte, AUCUN rejet vers le bas → le low est sacré
 bull_nw_raw = close > open and dn_wick <= thresh and big_bod
-
-// Bear nowick : bougie rouge, mèche HAUT ≈ 0 (pas de rejet vers le haut)
-// → les buyers n'ont pas réussi → le high est un niveau de résistance fort
+// Bear nowick : bougie rouge, AUCUN rejet vers le haut → le high est sacré
 bear_nw_raw = close < open and up_wick <= thresh and big_bod
 
-// ── FILTRE TREND : SMA200 ────────────────────────────────────────
+// ── FILTRE TREND : SMA200 ──────────────────────────────────────────────────────
 sma_ok_bull = not use_sma or close > sma200
 sma_ok_bear = not use_sma or close < sma200
 
-// ── FILTRE TREND : BOS (optionnel) ──────────────────────────────
+// ── FILTRE TREND : BOS (optionnel) ─────────────────────────────────────────────
 ph = ta.pivothigh(high, swing_len, swing_len)
 pl = ta.pivotlow(low,   swing_len, swing_len)
 var float last_ph = na
@@ -117,25 +114,23 @@ if not na(pl)
 
 bos_bull_det = not na(last_ph) and close > last_ph + atr * 0.1 and close[1] <= last_ph
 bos_bear_det = not na(last_pl) and close < last_pl - atr * 0.1 and close[1] >= last_pl
-
 var int bos_trend = 0
 if bos_bull_det
     bos_trend := 1
 if bos_bear_det
     bos_trend := -1
-
 bos_ok_bull = not use_bos or bos_trend == 1
 bos_ok_bear = not use_bos or bos_trend == -1
 
-// ── SESSION ──────────────────────────────────────────────────────
+// ── SESSION ────────────────────────────────────────────────────────────────────
 bar_h   = hour(time, "UTC")
 sess_ok = not use_sess or (bar_h >= sess_start and bar_h < sess_end)
 
-// ── NOWICK VALIDE ────────────────────────────────────────────────
+// ── NOWICK VALIDE ─────────────────────────────────────────────────────────────
 valid_bull = bull_nw_raw and sma_ok_bull and bos_ok_bull and strategy.position_size == 0
 valid_bear = bear_nw_raw and sma_ok_bear and bos_ok_bear and strategy.position_size == 0
 
-// ── STOCKAGE NIVEAU ──────────────────────────────────────────────
+// ── STOCKAGE NIVEAU ───────────────────────────────────────────────────────────
 var float nw_buy_lo = na
 var int   nw_buy_b  = na
 var float nw_sel_hi = na
@@ -144,7 +139,6 @@ var int   nw_sel_b  = na
 if valid_bull
     nw_buy_lo := low
     nw_buy_b  := bar_index
-
 if valid_bear
     nw_sel_hi := high
     nw_sel_b  := bar_index
@@ -160,7 +154,7 @@ if not na(age_sell) and age_sell > retest_bars
     nw_sel_hi := na
     nw_sel_b  := na
 
-// Invalidation (close casse le niveau)
+// Invalidation (close perce le niveau = le support/résistance a lâché)
 if not na(nw_buy_lo) and close < nw_buy_lo - atr * 0.1
     nw_buy_lo := na
     nw_buy_b  := na
@@ -168,30 +162,40 @@ if not na(nw_sel_hi) and close > nw_sel_hi + atr * 0.1
     nw_sel_hi := na
     nw_sel_b  := na
 
-// ── FILTRE REJECTION (sur la bougie de retest) ────────────────────
+// ── FILTRES RETEST ────────────────────────────────────────────────────────────
+// #1 DIRECTION : bougie dans le bon sens (filtre WR principal)
+dir_ok_buy  = not req_dir or close > open   // BUY = bougie verte sur le retest
+dir_ok_sell = not req_dir or close < open   // SELL = bougie rouge sur le retest
+
+// #2 REJECTION : wick visible sur la bougie de retest
 rej_ok_buy  = not use_rej or dn_wick >= body * rej_min
 rej_ok_sell = not use_rej or up_wick >= body * rej_min
 
-// ── DÉTECTION RETEST ─────────────────────────────────────────────
+// ── DÉTECTION RETEST ──────────────────────────────────────────────────────────
 tol = atr * retest_tol
 
+// BUY retest : le low a touché le niveau nowick + fermeture au-dessus
 retest_buy  = not na(nw_buy_lo) and age_buy  > 0 and age_buy  <= retest_bars and
-              low  <= nw_buy_lo + tol and close >= nw_buy_lo and rej_ok_buy
+              low  <= nw_buy_lo + tol and close >= nw_buy_lo and
+              dir_ok_buy and rej_ok_buy
 
+// SELL retest : le high a touché le niveau nowick + fermeture en-dessous
 retest_sell = not na(nw_sel_hi) and age_sell > 0 and age_sell <= retest_bars and
-              high >= nw_sel_hi - tol and close <= nw_sel_hi and rej_ok_sell
+              high >= nw_sel_hi - tol and close <= nw_sel_hi and
+              dir_ok_sell and rej_ok_sell
 
-// ── COOLDOWN ─────────────────────────────────────────────────────
+// ── COOLDOWN (buy/sell séparés) ───────────────────────────────────────────────
 var int last_buy_b  = -1000
 var int last_sell_b = -1000
 buy_cd  = (bar_index - last_buy_b)  >= cooldown_b
 sell_cd = (bar_index - last_sell_b) >= cooldown_b
 
-// ── SIGNAUX ──────────────────────────────────────────────────────
+// ── SIGNAUX FINAUX ───────────────────────────────────────────────────────────
 buy_sig  = retest_buy  and sess_ok and buy_cd  and strategy.position_size == 0
 sell_sig = retest_sell and sess_ok and sell_cd and strategy.position_size == 0
 
-// ── SL / TP ──────────────────────────────────────────────────────
+// ── SL / TP ──────────────────────────────────────────────────────────────────
+// SL sous le plus bas (niveau nowick ou low du retest)
 buy_sl    = buy_sig  ? math.min(nw_buy_lo, low)  - atr * sl_buf : na
 sell_sl   = sell_sig ? math.max(nw_sel_hi, high) + atr * sl_buf : na
 buy_risk  = not na(buy_sl)  ? close - buy_sl  : na
@@ -201,7 +205,7 @@ buy_tp2   = not na(buy_risk)  ? close + buy_risk * tp2_rr : na
 sell_tp1  = not na(sell_risk) ? close - sell_risk * tp_rr  : na
 sell_tp2  = not na(sell_risk) ? close - sell_risk * tp2_rr : na
 
-// Consommer le niveau
+// Consommer le niveau (évite re-entrée au même niveau)
 if buy_sig
     last_buy_b := bar_index
     nw_buy_lo  := na
@@ -211,7 +215,7 @@ if sell_sig
     nw_sel_hi   := na
     nw_sel_b    := na
 
-// ── ORDRES ───────────────────────────────────────────────────────
+// ── ORDRES ───────────────────────────────────────────────────────────────────
 var float a_entry = na
 var float a_sl    = na
 var float a_tp1   = na
@@ -219,11 +223,11 @@ var float a_tp2   = na
 var bool  tp1_hit = false
 
 if buy_sig
-    a_entry  := close
-    a_sl     := buy_sl
-    a_tp1    := buy_tp1
-    a_tp2    := buy_tp2
-    tp1_hit  := false
+    a_entry := close
+    a_sl    := buy_sl
+    a_tp1   := buy_tp1
+    a_tp2   := buy_tp2
+    tp1_hit := false
     strategy.entry("BUY", strategy.long, comment="BUY")
     if use_split
         strategy.exit("B_TP1", "BUY", qty_percent=50, limit=a_tp1, stop=a_sl, comment="TP1")
@@ -232,11 +236,11 @@ if buy_sig
         strategy.exit("B_EXIT", "BUY", limit=a_tp1, stop=a_sl)
 
 if sell_sig
-    a_entry  := close
-    a_sl     := sell_sl
-    a_tp1    := sell_tp1
-    a_tp2    := sell_tp2
-    tp1_hit  := false
+    a_entry := close
+    a_sl    := sell_sl
+    a_tp1   := sell_tp1
+    a_tp2   := sell_tp2
+    tp1_hit := false
     strategy.entry("SELL", strategy.short, comment="SELL")
     if use_split
         strategy.exit("S_TP1", "SELL", qty_percent=50, limit=a_tp1, stop=a_sl, comment="TP1")
@@ -244,8 +248,7 @@ if sell_sig
     else
         strategy.exit("S_EXIT", "SELL", limit=a_tp1, stop=a_sl)
 
-// ── BREAKEVEN après TP1 ──────────────────────────────────────────
-// Quand TP1 est touché, on annule l'ancien exit et on met le SL à l'entrée
+// Breakeven : après TP1, annuler TP2 et remplacer par un stop à l'entrée
 if use_split and not tp1_hit
     if strategy.position_size > 0 and not na(a_tp1) and high >= a_tp1
         tp1_hit := true
@@ -266,18 +269,17 @@ if strategy.position_size == 0
 // ============================================================================
 // VISUELS
 // ============================================================================
+// Nowick détecté (triangle) — beaucoup moins qu'avant avec 12% vs 15%
+plotshape(valid_bull, "Bull NW", shape.triangleup,   location.belowbar, color.lime, size=size.tiny)
+plotshape(valid_bear, "Bear NW", shape.triangledown, location.abovebar, color.red,  size=size.tiny)
 
-// Nowick détecté = triangle
-plotshape(valid_bull, "Bull NW", shape.triangleup,   location.belowbar, color.lime, size=size.small)
-plotshape(valid_bear, "Bear NW", shape.triangledown, location.abovebar, color.red,  size=size.small)
-
-// Signal d'entrée = label
+// Signaux d'entrée
 plotshape(buy_sig,  "BUY",  shape.labelup,   location.belowbar,
           color.new(color.green, 0), text="B", textcolor=color.white, size=size.small)
 plotshape(sell_sig, "SELL", shape.labeldown, location.abovebar,
           color.new(color.red,   0), text="S", textcolor=color.white, size=size.small)
 
-// SL / TP
+// SL / TP actifs
 plot(show_levels and strategy.position_size != 0 ? a_sl  : na, "SL",  color.new(color.red,  10), 2, plot.style_linebr)
 plot(show_levels and strategy.position_size != 0 ? a_tp1 : na, "TP1", color.new(color.lime, 20), 2, plot.style_linebr)
 plot(show_levels and strategy.position_size != 0 ? a_tp2 : na, "TP2", color.new(color.teal, 10), 1, plot.style_linebr)
@@ -286,16 +288,16 @@ plot(show_levels and strategy.position_size != 0 ? a_tp2 : na, "TP2", color.new(
 plot(show_sma ? sma200 : na, "SMA 200", color.new(color.yellow, 20), 2)
 
 // ============================================================================
-// TABLE STATS
+// TABLE RÉSULTATS
 // ============================================================================
 if barstate.islast
-    var table t = table.new(position.top_right, 2, 11,
+    var table t = table.new(position.top_right, 2, 12,
          bgcolor=color.new(color.black, 75),
          border_color=color.new(color.gray, 50), border_width=1)
 
-    table.cell(t, 0, 0, "NW v7.0",  text_color=color.white,  text_size=size.small,
+    table.cell(t, 0, 0, "NW v7.1",  text_color=color.white,  text_size=size.small,
                bgcolor=color.new(color.navy, 20), text_halign=text.align_center)
-    table.cell(t, 1, 0, "BACKTEST", text_color=color.yellow, text_size=size.small,
+    table.cell(t, 1, 0, "QUALITY",  text_color=color.yellow, text_size=size.small,
                bgcolor=color.new(color.navy, 20), text_halign=text.align_center)
 
     wr  = strategy.wintrades / math.max(strategy.closedtrades, 1) * 100
@@ -304,7 +306,7 @@ if barstate.islast
 
     table.cell(t, 0, 1, "Win Rate",       text_color=color.white, text_size=size.small)
     table.cell(t, 1, 1, str.tostring(math.round(wr, 1)) + "%",
-               text_color=wr >= 60 ? color.lime : wr >= 50 ? color.yellow : color.red, text_size=size.small)
+               text_color=wr >= 55 ? color.lime : wr >= 40 ? color.yellow : color.red, text_size=size.small)
 
     table.cell(t, 0, 2, "Profit Factor",  text_color=color.white, text_size=size.small)
     table.cell(t, 1, 2, str.tostring(math.round(pf, 2)),
@@ -314,24 +316,20 @@ if barstate.islast
     table.cell(t, 1, 3, "$" + str.tostring(math.round(pnl, 0)),
                text_color=pnl >= 0 ? color.lime : color.red, text_size=size.small)
 
-    table.cell(t, 0, 4, "Trades",         text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 4, "Trades total",   text_color=color.white, text_size=size.small)
     table.cell(t, 1, 4, str.tostring(strategy.closedtrades), text_color=color.white, text_size=size.small)
 
-    wk = strategy.closedtrades / math.max((last_bar_time - strategy.initial_capital) / (7 * 24 * 3600 * 1000.0), 1)
-    // approximate trades per week using bar count
-    bars_total   = bar_index + 1
-    weeks_approx = bars_total / (5 * 24 * 4.0)  // 5 trading days × 24h × 4 bars/h on 15m
-    trades_pw    = strategy.closedtrades / math.max(weeks_approx, 1)
-
+    // Trades/semaine approximatif sur M15 (96 barres/jour, 5j/semaine)
+    weeks = (bar_index + 1) / (96.0 * 5.0)
+    tpw   = strategy.closedtrades / math.max(weeks, 1)
     table.cell(t, 0, 5, "Trades/semaine", text_color=color.white, text_size=size.small)
-    table.cell(t, 1, 5, str.tostring(math.round(trades_pw, 1)),
-               text_color=trades_pw >= 4 ? color.lime : trades_pw >= 2 ? color.yellow : color.red, text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(math.round(tpw, 1)),
+               text_color=tpw >= 4 and tpw <= 10 ? color.lime : tpw >= 2 ? color.yellow : color.red, text_size=size.small)
 
     table.cell(t, 0, 6, "Max DD",         text_color=color.white, text_size=size.small)
     table.cell(t, 1, 6, str.tostring(math.round(strategy.max_drawdown_percent, 1)) + "%",
                text_color=strategy.max_drawdown_percent <= 10 ? color.lime :
-                           strategy.max_drawdown_percent <= 20 ? color.yellow : color.red,
-               text_size=size.small)
+                           strategy.max_drawdown_percent <= 20 ? color.yellow : color.red, text_size=size.small)
 
     table.cell(t, 0, 7, "Avg Win",        text_color=color.white, text_size=size.small)
     table.cell(t, 1, 7, "$" + str.tostring(math.round(strategy.avg_winning_trade, 2)),
@@ -341,14 +339,18 @@ if barstate.islast
     table.cell(t, 1, 8, "$" + str.tostring(math.round(strategy.avg_losing_trade, 2)),
                text_color=color.red, text_size=size.small)
 
-    table.cell(t, 0, 9, "Trend SMA",      text_color=color.white, text_size=size.small)
-    sma_dir = close > sma200 ? "▲ BULL" : "▼ BEAR"
-    table.cell(t, 1, 9, sma_dir,
+    table.cell(t, 0, 9, "Trend",          text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 9, close > sma200 ? "▲ BULL" : "▼ BEAR",
                text_color=close > sma200 ? color.lime : color.red, text_size=size.small)
 
     table.cell(t, 0, 10, "NW en attente", text_color=color.white, text_size=size.small)
-    nw_status = not na(nw_buy_lo) ? "BUY (" + str.tostring(age_buy) + "b)" :
-                not na(nw_sel_hi) ? "SELL (" + str.tostring(age_sell) + "b)" : "—"
-    table.cell(t, 1, 10, nw_status,
+    nw_st = not na(nw_buy_lo) ? "BUY " + str.tostring(age_buy) + "b" :
+            not na(nw_sel_hi) ? "SELL " + str.tostring(age_sell) + "b" : "—"
+    table.cell(t, 1, 10, nw_st,
                text_color=not na(nw_buy_lo) ? color.lime :
                            not na(nw_sel_hi) ? color.red : color.gray, text_size=size.small)
+
+    // Résumé des filtres actifs
+    filters = (use_sma ? "SMA " : "") + (req_dir ? "DIR " : "") + (use_rej ? "REJ " : "") + (use_bos ? "BOS" : "")
+    table.cell(t, 0, 11, "Filtres",       text_color=color.white, text_size=size.tiny)
+    table.cell(t, 1, 11, filters,         text_color=color.aqua,  text_size=size.tiny)
