@@ -2,88 +2,75 @@
 indicator("Nowick — Brad.fx", overlay=true, max_bars_back=500)
 
 // ══════════════════════════════════════════════════════════════════
-//  NOWICK — Brad.fx  |  VRAIE LOGIQUE (v3)
+//  NOWICK — Brad.fx  |  v4  (sans EMA — structure BOS uniquement)
 //
-//  PRINCIPE BRAD.FX :
+//  PRINCIPE :
 //  ┌──────────────────────────────────────────────────────────────┐
-//  │  1. UPTREND  + bougie VERTE sans mèche basse (open = low)  │
-//  │     → Établit un SUPPORT au low de la bougie               │
-//  │     → Attendre le RETEST de ce niveau (max 8 barres)       │
-//  │     → Si CLOSE ≥ low nowick au retest → BUY                │
-//  │     → Si CLOSE < low nowick → INVALIDATION                 │
+//  │  1. BOS haussier (close > dernier swing high)               │
+//  │     → trend = BULL                                          │
 //  │                                                              │
-//  │  2. DOWNTREND + bougie ROUGE sans mèche haute (open = high) │
-//  │     → Établit une RÉSISTANCE au high de la bougie          │
-//  │     → Attendre le RETEST (max 8 barres)                    │
-//  │     → Si CLOSE ≤ high nowick au retest → SELL              │
-//  │     → Si CLOSE > high nowick → INVALIDATION                │
+//  │  2. Pendant le pullback : bougie VERTE sans mèche basse     │
+//  │     (open ≈ low) → support au low de la bougie              │
 //  │                                                              │
-//  │  SL  : sous le low du nowick (buy) / au-dessus du high     │
-//  │  TP1 : 2 × Risk  |  TP2 : 3 × Risk                        │
-//  │  Sweep : wick qui dépasse le niveau mais close qui revient  │
-//  │          = ACCEPTABLE (sweep de liquidité)                  │
+//  │  3. Retest de ce niveau (max N barres)                      │
+//  │     → wick peut sweeper mais CLOSE doit tenir               │
+//  │     → SIGNAL BUY                                            │
+//  │                                                              │
+//  │  Inverse pour SELL (BOS baissier + nowick rouge)            │
+//  │                                                              │
+//  │  SL  : sous le low du nowick (buy) / au-dessus du high      │
+//  │  TP1 : 2 × Risk  |  TP2 : 3 × Risk                         │
 //  └──────────────────────────────────────────────────────────────┘
 // ══════════════════════════════════════════════════════════════════
 
 // ─── INPUTS ───────────────────────────────────────────────────────
 g1 = "Nowick (Détection)"
-wick_pct     = input.float(5.0,  "Mèche max (% du corps)",    minval=0.0, maxval=25.0, step=0.5,  group=g1,
-               tooltip="5% = standard Brad.fx. 0% = strict (open = low exactement). Augmenter si peu de nowicks.")
-min_body_atr = input.float(0.4,  "Corps min (× ATR)",         minval=0.1, maxval=2.0,  step=0.1,  group=g1)
-atr_len      = input.int(14,     "ATR length",                minval=5,   maxval=50,              group=g1)
+wick_pct      = input.float(5.0,  "Mèche max (% du corps)",    minval=0.0, maxval=25.0, step=0.5,  group=g1,
+                tooltip="5% = standard Brad.fx. 0% = strict (open = low exactement).")
+min_body_atr  = input.float(0.4,  "Corps min (× ATR)",         minval=0.1, maxval=2.0,  step=0.1,  group=g1)
+atr_len       = input.int(14,     "ATR length",                minval=5,   maxval=50,              group=g1)
 
 g2 = "Retest"
-retest_bars  = input.int(8,      "Fenêtre retest (barres)",   minval=1,   maxval=30,              group=g2,
-               tooltip="Brad.fx : 8 barres max. Après = niveau expiré.")
-retest_tol   = input.float(0.2,  "Tolérance sweep (× ATR)",  minval=0.0, maxval=1.0,  step=0.05, group=g2,
-               tooltip="Combien le wick peut aller en dessous/au-dessus du niveau (sweep acceptable).")
+retest_bars   = input.int(8,      "Fenêtre retest (barres)",   minval=1,   maxval=30,              group=g2,
+                tooltip="Max 8 barres pour retester le niveau. Après = expiré.")
+retest_tol    = input.float(0.2,  "Tolérance sweep (× ATR)",  minval=0.0, maxval=1.0,  step=0.05, group=g2,
+                tooltip="Wick peut sweeper jusqu'à X×ATR sous/au-dessus du niveau.")
 
-g3 = "Trend & Structure"
-use_htf      = input.bool(true,  "Filtre HTF EMA (1H)",       group=g3)
-htf_tf       = input.timeframe("60", "TF HTF",                group=g3)
-htf_fast     = input.int(20,     "EMA rapide",                group=g3)
-htf_slow     = input.int(50,     "EMA lente",                 group=g3)
-use_struct   = input.bool(true,  "Filtre structure locale",   group=g3,
-               tooltip="Le nowick doit être dans le pullback (sous HH en bull, au-dessus LL en bear).")
-swing_len    = input.int(5,      "Swing length",              minval=2,   maxval=20,              group=g3)
-bos_min_atr  = input.float(0.1,  "BOS distance min (× ATR)", minval=0.0, maxval=1.0,  step=0.05, group=g3,
-               tooltip="Le CLOSE doit dépasser le swing d'au moins X ATR pour valider le BOS. Évite les faux breaks d'1-2 pips.")
+g3 = "Structure (BOS)"
+use_struct    = input.bool(true,  "Filtre structure BOS",      group=g3,
+                tooltip="Trend déterminé par le BOS (close au-delà du dernier swing). Recommandé.")
+swing_len     = input.int(5,      "Swing length",              minval=2,   maxval=20,              group=g3)
+bos_min_atr   = input.float(0.1,  "BOS distance min (× ATR)", minval=0.0, maxval=1.0,  step=0.05, group=g3,
+                tooltip="Close doit dépasser le swing d'au moins X×ATR. Évite les faux breaks.")
 bos_full_body = input.bool(false, "BOS corps entier (strict)", group=g3,
-               tooltip="Si activé : OPEN ET CLOSE doivent être au-delà du swing (corps entier = confirmation maximale).")
+                tooltip="Open ET Close doivent être au-delà du swing pour valider le BOS.")
 
 g4 = "Filtres additionnels"
-use_rsi      = input.bool(false, "Filtre RSI",                group=g4)
-rsi_len      = input.int(14,     "RSI length",                group=g4)
-rsi_buy_max  = input.int(55,     "RSI max BUY",               minval=30,  maxval=70,              group=g4)
-rsi_sell_min = input.int(45,     "RSI min SELL",              minval=30,  maxval=70,              group=g4)
-use_sess     = input.bool(true,  "Filtre session UTC",        group=g4)
-sess_h_start = input.int(7,      "Début UTC",                 minval=0,   maxval=23,              group=g4)
-sess_h_end   = input.int(17,     "Fin UTC",                   minval=1,   maxval=23,              group=g4)
-cooldown_b   = input.int(15,     "Cooldown (barres)",         minval=1,   maxval=100,             group=g4)
+use_rsi       = input.bool(false, "Filtre RSI",                group=g4)
+rsi_len       = input.int(14,     "RSI length",                group=g4)
+rsi_buy_max   = input.int(55,     "RSI max BUY",               minval=30,  maxval=70,              group=g4)
+rsi_sell_min  = input.int(45,     "RSI min SELL",              minval=30,  maxval=70,              group=g4)
+use_sess      = input.bool(true,  "Filtre session UTC",        group=g4)
+sess_h_start  = input.int(7,      "Début UTC",                 minval=0,   maxval=23,              group=g4)
+sess_h_end    = input.int(17,     "Fin UTC",                   minval=1,   maxval=23,              group=g4)
+cooldown_b    = input.int(15,     "Cooldown (barres)",         minval=1,   maxval=100,             group=g4)
 
 g5 = "SL / TP"
-sl_buf       = input.float(0.3,  "SL buffer (× ATR)",        minval=0.0, maxval=2.0,  step=0.1,  group=g5)
-tp1_rr       = input.float(2.0,  "TP1 (RR)",                 minval=0.5, maxval=10.0, step=0.5,  group=g5)
-tp2_rr       = input.float(3.0,  "TP2 (RR)",                 minval=0.5, maxval=10.0, step=0.5,  group=g5)
-line_bars    = input.int(60,     "Durée lignes (barres)",     minval=5,   maxval=200,             group=g5)
+sl_buf        = input.float(0.3,  "SL buffer (× ATR)",        minval=0.0, maxval=2.0,  step=0.1,  group=g5)
+tp1_rr        = input.float(2.0,  "TP1 (RR)",                 minval=0.5, maxval=10.0, step=0.5,  group=g5)
+tp2_rr        = input.float(3.0,  "TP2 (RR)",                 minval=0.5, maxval=10.0, step=0.5,  group=g5)
+line_bars     = input.int(60,     "Durée lignes (barres)",     minval=5,   maxval=200,             group=g5)
 
 g6 = "Affichage"
-show_nw_dot  = input.bool(true,  "Dots nowick bruts",         group=g6)
-show_zone    = input.bool(true,  "Ligne zone retest",         group=g6)
-show_bos     = input.bool(true,  "Swings + BOS",              group=g6)
-show_sma200  = input.bool(true,  "SMA 200",                   group=g6)
-show_bg      = input.bool(true,  "Background HTF",            group=g6)
+show_nw_dot   = input.bool(true,  "Dots nowick bruts",         group=g6)
+show_zone     = input.bool(true,  "Ligne zone retest",         group=g6)
+show_bos      = input.bool(true,  "Swings + BOS labels",       group=g6)
+show_sma200   = input.bool(true,  "SMA 200",                   group=g6)
 
-// ─── CALCULS ──────────────────────────────────────────────────────
+// ─── CALCULS DE BASE ──────────────────────────────────────────────
 atr    = ta.atr(atr_len)
 sma200 = ta.sma(close, 200)
 rsi    = ta.rsi(close, rsi_len)
-
-[htf_ef, htf_es] = request.security(syminfo.tickerid, htf_tf,
-     [ta.ema(close, htf_fast), ta.ema(close, htf_slow)],
-     lookahead=barmerge.lookahead_off)
-htf_bull = htf_ef > htf_es
-htf_bear = htf_ef < htf_es
 
 // ─── DÉTECTION NOWICK ─────────────────────────────────────────────
 body    = math.abs(close - open)
@@ -92,17 +79,15 @@ dn_wick = math.min(open, close) - low
 thresh  = body * (wick_pct / 100.0)
 big_bod = body >= atr * min_body_atr
 
-// BULL NOWICK : bougie VERTE + pas de mèche basse (open ≈ low)
-// → Le marché monte depuis l'open sans jamais revenir en dessous
-// → Marque un SUPPORT au niveau du low (= open)
+// BULL NOWICK : bougie verte + mèche basse ≈ 0 (open ≈ low)
+// → momentum haussier pur, support au low
 bull_nw = close > open and dn_wick <= thresh and big_bod
 
-// BEAR NOWICK : bougie ROUGE + pas de mèche haute (open ≈ high)
-// → Le marché descend depuis l'open sans jamais remonter au-dessus
-// → Marque une RÉSISTANCE au niveau du high (= open)
+// BEAR NOWICK : bougie rouge + mèche haute ≈ 0 (open ≈ high)
+// → momentum baissier pur, résistance au high
 bear_nw = close < open and up_wick <= thresh and big_bod
 
-// ─── STRUCTURE LOCALE (HH/HL | LH/LL) ────────────────────────────
+// ─── STRUCTURE BOS ────────────────────────────────────────────────
 ph = ta.pivothigh(high, swing_len, swing_len)
 pl = ta.pivotlow(low,   swing_len, swing_len)
 
@@ -113,18 +98,13 @@ if not na(ph)
 if not na(pl)
     last_pl := pl
 
-// BOS = CORPS franchit le swing (wick = fake break, ignoré)
-// Protections contre les faux BOS :
-//   1. Utilise le CLOSE (pas le wick) → wick seul = fake break ignoré
-//   2. Distance min : close doit dépasser le niveau d'au moins bos_min_atr × ATR
-//      → élimine les faux breaks de 1-2 pips
-//   3. Option "corps entier" : OPEN ET CLOSE au-delà du swing
-//      → confirmation maximale, aucune ambiguïté
-bos_min   = atr * bos_min_atr
-// Mode standard : close au-delà + distance min
+// BOS — protections contre les faux breaks :
+//   1. CLOSE (pas le wick) → wick seul ignoré
+//   2. Distance min (bos_min_atr × ATR) → élimine les micro-breaks de 1-2 pips
+//   3. Option corps entier → open ET close au-delà du swing
+bos_min       = atr * bos_min_atr
 bos_bull_std  = not na(last_ph) and close > last_ph + bos_min and close[1] <= last_ph
 bos_bear_std  = not na(last_pl) and close < last_pl - bos_min and close[1] >= last_pl
-// Mode strict : corps entier au-delà du swing
 bos_bull_full = not na(last_ph) and math.min(open, close) > last_ph + bos_min and close[1] <= last_ph
 bos_bear_full = not na(last_pl) and math.max(open, close) < last_pl - bos_min and close[1] >= last_pl
 
@@ -143,29 +123,27 @@ sess_ok = not use_sess or (bar_h >= sess_h_start and bar_h < sess_h_end)
 rsi_buy = not use_rsi  or rsi <= rsi_buy_max
 rsi_sel = not use_rsi  or rsi >= rsi_sell_min
 
-// Trend aligné HTF + local
-trend_buy  = (not use_htf or htf_bull) and (not use_struct or trend == 1)
-trend_sell = (not use_htf or htf_bear) and (not use_struct or trend == -1)
+// Trend basé sur BOS uniquement (pas d'EMA)
+trend_buy  = not use_struct or trend == 1
+trend_sell = not use_struct or trend == -1
 
-// Pullback : nowick doit être sous le HH (pour buy) ou au-dessus du LL (pour sell)
+// Pullback : nowick doit être sous le HH (buy) ou au-dessus du LL (sell)
 in_pullback_buy  = not use_struct or (not na(last_ph) and close < last_ph)
 in_pullback_sell = not use_struct or (not na(last_pl) and close > last_pl)
 
-// ─── NOWICK VALIDE (avec trend) ───────────────────────────────────
+// ─── NOWICK VALIDE ────────────────────────────────────────────────
 valid_bull_nw = bull_nw and trend_buy  and in_pullback_buy
 valid_bear_nw = bear_nw and trend_sell and in_pullback_sell
 
 // ─── STOCKAGE DU NIVEAU NOWICK ────────────────────────────────────
-// On stocke le level (low pour bull, high pour bear) pour surveiller le retest
-var float nw_buy_lo = na    // support à retester
-var float nw_buy_cl = na    // close du nowick (top de la zone)
-var int   nw_buy_b  = na    // bar_index du nowick
+var float nw_buy_lo = na
+var float nw_buy_cl = na
+var int   nw_buy_b  = na
 
-var float nw_sel_hi = na    // résistance à retester
-var float nw_sel_cl = na    // close du nowick (bas de la zone)
+var float nw_sel_hi = na
+var float nw_sel_cl = na
 var int   nw_sel_b  = na
 
-// Lignes pending zone
 var line ln_buy_zone = na
 var line ln_sel_zone = na
 
@@ -173,7 +151,6 @@ if valid_bull_nw
     nw_buy_lo := low
     nw_buy_cl := close
     nw_buy_b  := bar_index
-    // Dessiner la ligne de la zone retest
     if not na(ln_buy_zone)
         line.delete(ln_buy_zone)
     if show_zone
@@ -194,7 +171,6 @@ if valid_bear_nw
 age_buy  = na(nw_buy_b) ? na : bar_index - nw_buy_b
 age_sell = na(nw_sel_b) ? na : bar_index - nw_sel_b
 
-// Expiration : fenêtre dépassée
 if not na(age_buy) and age_buy > retest_bars
     nw_buy_lo := na
     nw_buy_b  := na
@@ -209,8 +185,7 @@ if not na(age_sell) and age_sell > retest_bars
         line.delete(ln_sel_zone)
         ln_sel_zone := na
 
-// Invalidation : CLOSE casse le niveau (pas juste un wick)
-// → Brad.fx : si le prix ferme sous le support du nowick → setup annulé
+// Invalidation : CLOSE casse le niveau → setup annulé
 if not na(nw_buy_lo) and close < nw_buy_lo - atr * 0.05
     nw_buy_lo := na
     nw_buy_b  := na
@@ -228,20 +203,11 @@ if not na(nw_sel_hi) and close > nw_sel_hi + atr * 0.05
 // ─── DÉTECTION RETEST ─────────────────────────────────────────────
 tol = atr * retest_tol
 
-// RETEST BUY :
-//   - Pas sur la bougie nowick elle-même (age > 0)
-//   - Dans la fenêtre (age ≤ retest_bars)
-//   - Le wick (low) touche ou sweeps le niveau support
-//   - Le CLOSE reste AU-DESSUS → niveau tenu → SIGNAL BUY
 retest_buy = not na(nw_buy_lo) and
              age_buy > 0 and age_buy <= retest_bars and
              low  <= nw_buy_lo + tol and
              close >= nw_buy_lo
 
-// RETEST SELL :
-//   - Pas sur la bougie nowick elle-même
-//   - Le wick (high) touche ou sweeps la résistance
-//   - Le CLOSE reste EN-DESSOUS → niveau tenu → SIGNAL SELL
 retest_sell = not na(nw_sel_hi) and
               age_sell > 0 and age_sell <= retest_bars and
               high >= nw_sel_hi - tol and
@@ -257,16 +223,12 @@ sell_cd = (bar_index - last_sell_b) >= cooldown_b
 buy_sig  = retest_buy  and sess_ok and rsi_buy and buy_cd
 sell_sig = retest_sell and sess_ok and rsi_sel and sell_cd
 
-// ─── SL / TP (calculés avant de consommer le niveau) ──────────────
-// SL = sous le low du nowick (support retesté) + buffer ATR
-// Si le retest a sweeped plus bas → SL sous le low du retest aussi
-_buy_sl_nw    = buy_sig  ? nw_buy_lo                            : na
-_buy_sl_level = buy_sig  ? math.min(_buy_sl_nw, low) - atr * sl_buf : na
-_sel_sl_nw    = sell_sig ? nw_sel_hi                            : na
-_sel_sl_level = sell_sig ? math.max(_sel_sl_nw, high) + atr * sl_buf : na
+// ─── SL / TP ──────────────────────────────────────────────────────
+_buy_sl_level  = buy_sig  ? math.min(nw_buy_lo, low)  - atr * sl_buf : na
+_sell_sl_level = sell_sig ? math.max(nw_sel_hi, high) + atr * sl_buf : na
 
 buy_sl   = _buy_sl_level
-sell_sl  = _sel_sl_level
+sell_sl  = _sell_sl_level
 
 buy_risk  = not na(buy_sl)  ? close - buy_sl  : na
 sell_risk = not na(sell_sl) ? sell_sl - close : na
@@ -318,14 +280,14 @@ if sell_sig
     t_buy   := false
 
 // ─── LIGNES SL/TP ─────────────────────────────────────────────────
-var line  ln_sl    = na
-var line  ln_en    = na
-var line  ln_tp1   = na
-var line  ln_tp2   = na
-var label lb_sl    = na
-var label lb_en    = na
-var label lb_tp1   = na
-var label lb_tp2   = na
+var line  ln_sl  = na
+var line  ln_en  = na
+var line  ln_tp1 = na
+var line  ln_tp2 = na
+var label lb_sl  = na
+var label lb_en  = na
+var label lb_tp1 = na
+var label lb_tp2 = na
 
 f_del() =>
     if not na(ln_sl)  line.delete(ln_sl)
@@ -362,7 +324,6 @@ if buy_sig or sell_sig
     lb_tp2 := label.new(x2, _tp2, "TP2  "   + str.tostring(_tp2, "#.#####") + "  (" + str.tostring(_rr2) + "R)",
                 color=color.new(color.green,10), textcolor=color.black, style=label.style_label_left, size=size.small)
 
-// Expiration des lignes SL/TP
 if not na(t_sbar) and (bar_index - t_sbar) > line_bars
     f_del()
 
@@ -382,13 +343,13 @@ if show_bos and bos_bear
               color=color.new(color.red, 70), textcolor=color.red,
               style=label.style_label_down, size=size.tiny)
 
-// Dots nowick bruts (avant filtres)
+// Dots nowick bruts
 plotshape(show_nw_dot and bull_nw, "Bull NW", shape.circle,
           location.belowbar, color.new(color.green, 40), size=size.tiny)
 plotshape(show_nw_dot and bear_nw, "Bear NW", shape.circle,
           location.abovebar, color.new(color.red,   40), size=size.tiny)
 
-// Nowick valide (filtré par trend) — triangle rempli
+// Nowick valide (filtré par structure)
 plotshape(valid_bull_nw, "Bull NW Valide", shape.triangleup,   location.belowbar,
           color.new(color.lime, 0), size=size.small)
 plotshape(valid_bear_nw, "Bear NW Valide", shape.triangledown, location.abovebar,
@@ -400,59 +361,53 @@ plotshape(buy_sig,  "BUY",  shape.labelup,   location.belowbar,
 plotshape(sell_sig, "SELL", shape.labeldown, location.abovebar,
           color.new(color.red,   0), text="SELL", textcolor=color.white, size=size.normal)
 
-// SMA 200 & Background
+// SMA 200 (référence visuelle uniquement, pas un filtre)
 plot(show_sma200 ? sma200 : na, "SMA 200", color.new(color.yellow, 25), 2)
-bgcolor(show_bg and htf_bull ? color.new(color.green, 95) :
-        show_bg and htf_bear ? color.new(color.red,   95) : na, title="HTF BG")
 
 // ─── TABLEAU ──────────────────────────────────────────────────────
 if barstate.islast
-    var table tb = table.new(position.top_right, 2, 10,
+    var table tb = table.new(position.top_right, 2, 9,
          bgcolor=color.new(color.black, 65),
          border_color=color.new(color.gray, 55), border_width=1,
          frame_color=color.new(color.gray, 40), frame_width=1)
 
-    table.cell(tb, 0, 0, "NOWICK",   bgcolor=color.new(color.navy, 10), text_color=color.white,  text_size=size.small)
-    table.cell(tb, 1, 0, "Brad.fx",  bgcolor=color.new(color.navy, 10), text_color=color.yellow, text_size=size.small)
+    table.cell(tb, 0, 0, "NOWICK",    bgcolor=color.new(color.navy, 10), text_color=color.white,  text_size=size.small)
+    table.cell(tb, 1, 0, "Brad.fx",   bgcolor=color.new(color.navy, 10), text_color=color.yellow, text_size=size.small)
 
-    table.cell(tb, 0, 1, "HTF 1H",   text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 1, not use_htf ? "OFF" : htf_bull ? "▲ BULL" : "▼ BEAR",
-         text_color=not use_htf ? color.gray : htf_bull ? color.lime : color.red, text_size=size.small)
-
-    table.cell(tb, 0, 2, "Trend LTF", text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 2, not use_struct ? "OFF" : trend == 1 ? "▲ BULL" : trend == -1 ? "▼ BEAR" : "— RANGE",
+    table.cell(tb, 0, 1, "Trend BOS", text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 1, not use_struct ? "OFF" : trend == 1 ? "▲ BULL" : trend == -1 ? "▼ BEAR" : "— RANGE",
          text_color=not use_struct ? color.gray : trend == 1 ? color.lime : trend == -1 ? color.red : color.gray, text_size=size.small)
 
-    table.cell(tb, 0, 3, "RSI",       text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 3, str.tostring(math.round(rsi, 1)),
-         text_color=rsi <= rsi_buy_max ? color.lime : rsi >= rsi_sell_min ? color.red : color.gray, text_size=size.small)
+    table.cell(tb, 0, 2, "RSI",       text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 2, not use_rsi ? "OFF" : str.tostring(math.round(rsi, 1)),
+         text_color=not use_rsi ? color.gray : rsi <= rsi_buy_max ? color.lime : rsi >= rsi_sell_min ? color.red : color.gray, text_size=size.small)
 
-    table.cell(tb, 0, 4, "Session",   text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 4, not use_sess ? "OFF" : sess_ok ? "ON (" + str.tostring(bar_h) + "h)" : "CLOSED",
+    table.cell(tb, 0, 3, "Session",   text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 3, not use_sess ? "OFF" : sess_ok ? "ON (" + str.tostring(bar_h) + "h)" : "CLOSED",
          text_color=not use_sess ? color.gray : sess_ok ? color.lime : color.orange, text_size=size.small)
 
-    table.cell(tb, 0, 5, "NW BUY",    text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 5, not na(nw_buy_lo) ? "En attente (" + str.tostring(age_buy) + "b)" : "—",
+    table.cell(tb, 0, 4, "NW BUY",    text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 4, not na(nw_buy_lo) ? "En attente (" + str.tostring(age_buy) + "b)" : "—",
          text_color=not na(nw_buy_lo) ? color.lime : color.gray, text_size=size.small)
 
-    table.cell(tb, 0, 6, "NW SELL",   text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 6, not na(nw_sel_hi) ? "En attente (" + str.tostring(age_sell) + "b)" : "—",
+    table.cell(tb, 0, 5, "NW SELL",   text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 5, not na(nw_sel_hi) ? "En attente (" + str.tostring(age_sell) + "b)" : "—",
          text_color=not na(nw_sel_hi) ? color.red : color.gray, text_size=size.small)
 
-    table.cell(tb, 0, 7, "SL",        text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 7, not na(t_sl)  ? str.tostring(t_sl,  "#.#####") : "—",
+    table.cell(tb, 0, 6, "SL",        text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 6, not na(t_sl)  ? str.tostring(t_sl,  "#.#####") : "—",
          text_color=color.red, text_size=size.small)
 
-    table.cell(tb, 0, 8, "TP1",       text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 8, not na(t_tp1) ? str.tostring(t_tp1, "#.#####") : "—",
+    table.cell(tb, 0, 7, "TP1",       text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 7, not na(t_tp1) ? str.tostring(t_tp1, "#.#####") : "—",
          text_color=color.lime, text_size=size.small)
 
-    table.cell(tb, 0, 9, "TP2",       text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 9, not na(t_tp2) ? str.tostring(t_tp2, "#.#####") : "—",
+    table.cell(tb, 0, 8, "TP2",       text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 8, not na(t_tp2) ? str.tostring(t_tp2, "#.#####") : "—",
          text_color=color.green, text_size=size.small)
 
 // ─── ALERTES ──────────────────────────────────────────────────────
-alertcondition(valid_bull_nw, "Nowick BUY détecté",  "Nowick BULL détecté — attendre le retest du low")
-alertcondition(valid_bear_nw, "Nowick SELL détecté", "Nowick BEAR détecté — attendre le retest du high")
+alertcondition(valid_bull_nw, "Nowick BUY détecté",  "Nowick BULL — attendre le retest du low")
+alertcondition(valid_bear_nw, "Nowick SELL détecté", "Nowick BEAR — attendre le retest du high")
 alertcondition(buy_sig,       "ENTRÉE BUY",          "Retest tenu — ENTRÉE BUY confirmée")
 alertcondition(sell_sig,      "ENTRÉE SELL",         "Retest tenu — ENTRÉE SELL confirmée")
