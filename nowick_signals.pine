@@ -1,0 +1,167 @@
+// ============================================================================
+// NOWICK SIGNALS — Indicateur pur (pas de stratégie)
+// Affiche : signal BUY/SELL + lignes TP/SL/Entry directement sur le chart
+// Usage   : coller dans TradingView > Indicateurs > Pine Editor
+// ============================================================================
+
+//@version=5
+indicator("Nowick Signals", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ── INPUTS ────────────────────────────────────────────────────────────────────
+wick_pct     = input.float(12.0, "Mèche max (% corps)",  minval=1, maxval=50, step=1)
+min_body_atr = input.float(0.3,  "Corps min (× ATR)",    minval=0.1, maxval=2, step=0.1)
+atr_len      = input.int(14,     "ATR length",            minval=5)
+expire_bars  = input.int(9,      "Expiration (barres)",   minval=1, maxval=50)
+sl_buf       = input.float(0.5,  "SL buffer (× ATR)",    minval=0, maxval=3, step=0.1)
+rr           = input.float(2.0,  "Risk / Reward",         minval=0.5, maxval=10, step=0.1)
+use_sma      = input.bool(true,  "Filtre SMA 200")
+sma_len      = input.int(200,    "SMA length",            minval=20)
+
+// ── CALCULS ───────────────────────────────────────────────────────────────────
+atr    = ta.atr(atr_len)
+sma200 = ta.sma(close, sma_len)
+
+body    = math.abs(close - open)
+up_wick = high - math.max(open, close)
+dn_wick = math.min(open, close) - low
+big_bod = body >= atr * min_body_atr
+thresh  = body * (wick_pct / 100.0)
+
+bull_nw     = close > open and dn_wick <= thresh and big_bod
+bear_nw     = close < open and up_wick <= thresh and big_bod
+sma_ok_bull = not use_sma or close > sma200
+sma_ok_bear = not use_sma or close < sma200
+
+// ── ÉTAT PENDING ──────────────────────────────────────────────────────────────
+var float pend_bull_hi = na
+var float pend_bull_lo = na
+var int   pend_bull_b  = na
+var float lock_bull_sl = na
+var bool  bull_fired   = false
+
+var float pend_bear_lo = na
+var float pend_bear_hi = na
+var int   pend_bear_b  = na
+var float lock_bear_sl = na
+var bool  bear_fired   = false
+
+// Nouveau nowick → remplace l'ancien (most recent wins)
+if bull_nw and sma_ok_bull
+    pend_bull_hi := high
+    pend_bull_lo := low
+    pend_bull_b  := bar_index
+    lock_bull_sl := low - atr * sl_buf
+    bull_fired   := false
+
+if bear_nw and sma_ok_bear
+    pend_bear_lo := low
+    pend_bear_hi := high
+    pend_bear_b  := bar_index
+    lock_bear_sl := high + atr * sl_buf
+    bear_fired   := false
+
+// Ages
+bull_age = na(pend_bull_b) ? na : bar_index - pend_bull_b
+bear_age = na(pend_bear_b) ? na : bar_index - pend_bear_b
+
+// Expiration (9 barres sans break → annulé)
+if not na(bull_age) and bull_age > expire_bars
+    pend_bull_hi := na
+    pend_bull_lo := na
+    pend_bull_b  := na
+    lock_bull_sl := na
+    bull_fired   := false
+
+if not na(bear_age) and bear_age > expire_bars
+    pend_bear_lo := na
+    pend_bear_hi := na
+    pend_bear_b  := na
+    lock_bear_sl := na
+    bear_fired   := false
+
+// Invalidation (close perce le nowick = momentum annulé)
+if not na(pend_bull_lo) and close < pend_bull_lo
+    pend_bull_hi := na
+    pend_bull_lo := na
+    pend_bull_b  := na
+    lock_bull_sl := na
+    bull_fired   := false
+
+if not na(pend_bear_hi) and close > pend_bear_hi
+    pend_bear_lo := na
+    pend_bear_hi := na
+    pend_bear_b  := na
+    lock_bear_sl := na
+    bear_fired   := false
+
+// ── DÉTECTION BREAK ───────────────────────────────────────────────────────────
+buy_signal  = not na(pend_bull_hi) and bull_age > 0 and high >= pend_bull_hi and not bull_fired
+sell_signal = not na(pend_bear_lo) and bear_age > 0 and low  <= pend_bear_lo and not bear_fired
+
+// ── BUY SIGNAL ────────────────────────────────────────────────────────────────
+if buy_signal
+    entry = pend_bull_hi
+    sl    = lock_bull_sl
+    tp    = entry + (entry - sl) * rr
+    risk  = math.round((entry - sl) / syminfo.mintick)
+
+    // Label avec les niveaux
+    label.new(bar_index, low - atr * 0.5,
+              "▲ BUY\n" +
+              "Entry  " + str.tostring(entry, "#.#####") + "\n" +
+              "TP      " + str.tostring(tp,    "#.#####") + "\n" +
+              "SL      " + str.tostring(sl,    "#.#####") + "\n" +
+              "Risk    " + str.tostring(risk,  "0") + "p",
+              yloc      = yloc.price,
+              color     = color.new(color.green, 5),
+              textcolor = color.white,
+              style     = label.style_label_up,
+              size      = size.small)
+
+    // Lignes TP / Entry / SL (étendues 40 barres)
+    line.new(bar_index, tp,    bar_index + 40, tp,    color=color.new(color.lime,   10), width=2, style=line.style_dashed)
+    line.new(bar_index, entry, bar_index + 40, entry, color=color.new(color.white,  40), width=1, style=line.style_dotted)
+    line.new(bar_index, sl,    bar_index + 40, sl,    color=color.new(color.red,    10), width=2, style=line.style_dashed)
+
+    bull_fired   := true
+    pend_bull_hi := na
+    pend_bull_lo := na
+    pend_bull_b  := na
+    lock_bull_sl := na
+
+// ── SELL SIGNAL ───────────────────────────────────────────────────────────────
+if sell_signal
+    entry = pend_bear_lo
+    sl    = lock_bear_sl
+    tp    = entry - (sl - entry) * rr
+    risk  = math.round((sl - entry) / syminfo.mintick)
+
+    label.new(bar_index, high + atr * 0.5,
+              "▼ SELL\n" +
+              "Entry  " + str.tostring(entry, "#.#####") + "\n" +
+              "TP      " + str.tostring(tp,    "#.#####") + "\n" +
+              "SL      " + str.tostring(sl,    "#.#####") + "\n" +
+              "Risk    " + str.tostring(risk,  "0") + "p",
+              yloc      = yloc.price,
+              color     = color.new(color.red, 5),
+              textcolor = color.white,
+              style     = label.style_label_down,
+              size      = size.small)
+
+    line.new(bar_index, tp,    bar_index + 40, tp,    color=color.new(color.lime,   10), width=2, style=line.style_dashed)
+    line.new(bar_index, entry, bar_index + 40, entry, color=color.new(color.white,  40), width=1, style=line.style_dotted)
+    line.new(bar_index, sl,    bar_index + 40, sl,    color=color.new(color.red,    10), width=2, style=line.style_dashed)
+
+    bear_fired   := true
+    pend_bear_lo := na
+    pend_bear_hi := na
+    pend_bear_b  := na
+    lock_bear_sl := na
+
+// ── VISUELS ───────────────────────────────────────────────────────────────────
+// Triangles sur les nowicks détectés
+plotshape(bull_nw and sma_ok_bull, "Bull NW", shape.triangleup,   location.belowbar, color.lime, size=size.tiny)
+plotshape(bear_nw and sma_ok_bear, "Bear NW", shape.triangledown, location.abovebar, color.red,  size=size.tiny)
+
+// SMA200
+plot(use_sma ? sma200 : na, "SMA 200", color.new(color.yellow, 30), 2)
