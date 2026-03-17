@@ -46,6 +46,10 @@ htf_slow     = input.int(50,     "EMA lente",                 group=g3)
 use_struct   = input.bool(true,  "Filtre structure locale",   group=g3,
                tooltip="Le nowick doit être dans le pullback (sous HH en bull, au-dessus LL en bear).")
 swing_len    = input.int(5,      "Swing length",              minval=2,   maxval=20,              group=g3)
+bos_min_atr  = input.float(0.1,  "BOS distance min (× ATR)", minval=0.0, maxval=1.0,  step=0.05, group=g3,
+               tooltip="Le CLOSE doit dépasser le swing d'au moins X ATR pour valider le BOS. Évite les faux breaks d'1-2 pips.")
+bos_full_body = input.bool(false, "BOS corps entier (strict)", group=g3,
+               tooltip="Si activé : OPEN ET CLOSE doivent être au-delà du swing (corps entier = confirmation maximale).")
 
 g4 = "Filtres additionnels"
 use_rsi      = input.bool(false, "Filtre RSI",                group=g4)
@@ -110,8 +114,22 @@ if not na(pl)
     last_pl := pl
 
 // BOS = CORPS franchit le swing (wick = fake break, ignoré)
-bos_bull = not na(last_ph) and close > last_ph and close[1] <= last_ph
-bos_bear = not na(last_pl) and close < last_pl and close[1] >= last_pl
+// Protections contre les faux BOS :
+//   1. Utilise le CLOSE (pas le wick) → wick seul = fake break ignoré
+//   2. Distance min : close doit dépasser le niveau d'au moins bos_min_atr × ATR
+//      → élimine les faux breaks de 1-2 pips
+//   3. Option "corps entier" : OPEN ET CLOSE au-delà du swing
+//      → confirmation maximale, aucune ambiguïté
+bos_min   = atr * bos_min_atr
+// Mode standard : close au-delà + distance min
+bos_bull_std  = not na(last_ph) and close > last_ph + bos_min and close[1] <= last_ph
+bos_bear_std  = not na(last_pl) and close < last_pl - bos_min and close[1] >= last_pl
+// Mode strict : corps entier au-delà du swing
+bos_bull_full = not na(last_ph) and math.min(open, close) > last_ph + bos_min and close[1] <= last_ph
+bos_bear_full = not na(last_pl) and math.max(open, close) < last_pl - bos_min and close[1] >= last_pl
+
+bos_bull = bos_full_body ? bos_bull_full : bos_bull_std
+bos_bear = bos_full_body ? bos_bear_full : bos_bear_std
 
 var int trend = 0
 if bos_bull

@@ -39,8 +39,12 @@ use_htf      = input.bool(true,  "Filtre HTF EMA",           group=grp3)
 htf_tf       = input.timeframe("60", "TF HTF",               group=grp3)
 htf_fast     = input.int(20,     "EMA rapide HTF",           group=grp3)
 htf_slow     = input.int(50,     "EMA lente HTF",            group=grp3)
-use_struct   = input.bool(true,  "Filtre structure locale",  group=grp3)
-swing_len    = input.int(5,      "Swing length",             minval=2,   maxval=20,              group=grp3)
+use_struct    = input.bool(true,  "Filtre structure locale",  group=grp3)
+swing_len     = input.int(5,      "Swing length",             minval=2,   maxval=20,              group=grp3)
+bos_min_atr   = input.float(0.1,  "BOS distance min (× ATR)", minval=0.0, maxval=1.0, step=0.05, group=grp3,
+                tooltip="Distance min au-delà du swing pour valider le BOS. Évite les faux breaks.")
+bos_full_body = input.bool(false, "BOS corps entier (strict)", group=grp3,
+                tooltip="OPEN ET CLOSE doivent être au-delà du swing = confirmation maximale.")
 
 grp4 = "Filtres additionnels"
 use_rsi      = input.bool(false, "Filtre RSI",               group=grp4)
@@ -104,8 +108,19 @@ if not na(ph)
 if not na(pl)
     last_pl := pl
 
-bos_bull = not na(last_ph) and close > last_ph and close[1] <= last_ph
-bos_bear = not na(last_pl) and close < last_pl and close[1] >= last_pl
+// BOS — protections contre les faux breaks :
+//   1. CLOSE (pas le wick) → wick seul = fake break ignoré
+//   2. Distance min (bos_min_atr × ATR) → élimine les micro-breaks de 1-2 pips
+//   3. Option corps entier → open ET close au-delà du swing
+bos_min       = atr * bos_min_atr
+bos_bull_std  = not na(last_ph) and close > last_ph + bos_min and close[1] <= last_ph
+bos_bear_std  = not na(last_pl) and close < last_pl - bos_min and close[1] >= last_pl
+bos_bull_full = not na(last_ph) and math.min(open, close) > last_ph + bos_min and close[1] <= last_ph
+bos_bear_full = not na(last_pl) and math.max(open, close) < last_pl - bos_min and close[1] >= last_pl
+
+bos_bull = bos_full_body ? bos_bull_full : bos_bull_std
+bos_bear = bos_full_body ? bos_bear_full : bos_bear_std
+
 var int trend = 0
 if bos_bull
     trend := 1
