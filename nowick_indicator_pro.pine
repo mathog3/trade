@@ -1,53 +1,59 @@
 //@version=6
-indicator("Nowick PRO — Brad.fx", overlay=true, max_bars_back=500)
+indicator("Nowick — Brad.fx", overlay=true, max_bars_back=500)
 
 // ══════════════════════════════════════════════════════════════════
-//  NOWICK RETEST — Brad.fx
+//  NOWICK — Brad.fx
 //
-//  LOGIQUE:
-//  • Wickless Bear (close = low, pas de wick bas) → SUPPORT
-//  • Wickless Bull (close = high, pas de wick haut) → RÉSISTANCE
-//  • Le prix ESCAPE du niveau (confirme son importance)
-//  • Le prix RETESTE + bougie de CONFIRMATION → ENTRÉE
+//  LOGIQUE (stratégie Nowick réelle) :
+//  1. BOS (Break of Structure) : close du BODY au-delà du dernier swing H/L
+//     → Un simple wick = fake break, ignoré
+//  2. Trend haussier  : HH + HL  (dernière BOS à la hausse)
+//     Trend baissier  : LH + LL  (dernière BOS à la baisse)
+//  3. Pullback vers la zone HL (bull) ou LH (bear)
+//  4. Bougie NOWICK qui se forme dans cette zone → ENTRÉE
+//     • Bullish nowick : open ≈ low  (pas de mèche inf.) = support au open
+//     • Bearish nowick : open ≈ high (pas de mèche sup.) = résistance au open
+//  5. Sweep de liquidité géré : wick sous le HL / au-dessus du LH
+//     accepté tant que le CLOSE revient dans la zone
 //
-//  FILTRES:
-//  • HTF EMA 20/50 (1H) — alignement tendance
-//  • Session London/NY (7h-17h UTC)
-//  • Cooldown anti-clustering
-//  • Bougie de confirmation (close du bon côté)
-//
-//  SL  : sous/au-dessus de la wickless candle + buffer ATR
-//  TP1 : 1.5 × Risk  |  TP2 : 2.5 × Risk
+//  SL  : sous le low de la bougie nowick + buffer ATR
+//  TP1 : 2 × Risk  |  TP2 : 3 × Risk
 // ══════════════════════════════════════════════════════════════════
 
 // ─── INPUTS ───────────────────────────────────────────────────────
-g1 = "Wickless"
-wick_max     = input.float(5.0,  "Wick max (% body)",          minval=0,   maxval=20,  step=1.0, group=g1)
-min_body_atr = input.float(0.4,  "Body min (× ATR)",           minval=0.1, maxval=2.0, step=0.1, group=g1)
-atr_len      = input.int(14,     "ATR",                        minval=5,   maxval=50,            group=g1)
+g1 = "Nowick"
+wick_max     = input.float(10.0, "Wick max (% du corps)",      minval=0,   maxval=40,  step=1.0,  group=g1,
+               tooltip="10% = corps de 10 pips → mèche max 1 pip. Augmenter si trop peu de nowicks.")
+min_body_atr = input.float(0.2,  "Corps min (× ATR)",          minval=0.1, maxval=2.0, step=0.1,  group=g1)
+atr_len      = input.int(14,     "ATR length",                 minval=5,   maxval=50,             group=g1)
 
-g2 = "Retest"
-escape_mult  = input.float(0.6,  "Escape min (× ATR)",         minval=0.2, maxval=3.0, step=0.1, group=g2)
-retest_zone  = input.float(0.4,  "Zone retest (× ATR)",        minval=0.1, maxval=1.5, step=0.1, group=g2)
-max_bars     = input.int(60,     "Expiry (barres)",            minval=10,  maxval=300,            group=g2)
-cooldown_b   = input.int(6,      "Cooldown (barres min)",      minval=1,   maxval=30,             group=g2)
+g2 = "Structure (BOS + Swings)"
+swing_len    = input.int(5,      "Swing length (barres)",      minval=2,   maxval=20,             group=g2,
+               tooltip="Barres chaque côté pour valider un swing. 5 = bon pour 15m-1H. 3 = très réactif.")
+zone_buf     = input.float(1.5,  "Zone pullback (× ATR)",      minval=0.5, maxval=5.0, step=0.1,  group=g2,
+               tooltip="Tolérance sous/sur le HL/LH. Inclut les sweeps de liquidité.")
 
-g3 = "HTF Trend (1H)"
-use_htf      = input.bool(true,  "Filtre HTF",                 group=g3)
-htf_tf       = input.timeframe("60", "Timeframe",              group=g3)
+g3 = "Filtres (off par défaut)"
+use_htf      = input.bool(false, "Filtre HTF EMA (1H)",        group=g3)
+htf_tf       = input.timeframe("60", "Timeframe HTF",          group=g3)
 ema_fast     = input.int(20,     "EMA rapide",                 group=g3)
 ema_slow     = input.int(50,     "EMA lente",                  group=g3)
+use_sess     = input.bool(false, "Filtre session (UTC)",       group=g3)
+sess_start   = input.int(7,      "Début UTC",                  minval=0,   maxval=23,             group=g3)
+sess_end     = input.int(17,     "Fin UTC",                    minval=1,   maxval=23,             group=g3)
+cooldown_b   = input.int(5,      "Cooldown (barres)",          minval=1,   maxval=100,            group=g3)
 
-g4 = "Session"
-use_sess     = input.bool(true,  "Filtre session",             group=g4)
-sess_start   = input.int(7,      "Début UTC",                  minval=0,   maxval=23, group=g4)
-sess_end     = input.int(17,     "Fin UTC",                    minval=1,   maxval=23, group=g4)
+g4 = "SL / TP"
+sl_buf       = input.float(0.5,  "SL buffer (× ATR)",         minval=0.1, maxval=3.0, step=0.1,  group=g4)
+tp1_rr       = input.float(2.0,  "TP1 (RR)",                  minval=0.5, maxval=10.0, step=0.1, group=g4)
+tp2_rr       = input.float(3.0,  "TP2 (RR)",                  minval=0.5, maxval=10.0, step=0.1, group=g4)
+line_bars    = input.int(50,     "Longueur lignes (barres)",  minval=5,   maxval=200,            group=g4)
 
-g5 = "SL / TP"
-sl_buf       = input.float(0.8,  "Buffer SL (× ATR)",         minval=0.2, maxval=3.0, step=0.1, group=g5)
-tp1_rr       = input.float(1.5,  "TP1 (RR)",                  minval=1.0, maxval=5.0, step=0.1, group=g5)
-tp2_rr       = input.float(2.5,  "TP2 (RR)",                  minval=1.0, maxval=8.0, step=0.1, group=g5)
-line_bars    = input.int(50,     "Lignes visibles (barres)",  minval=5,   maxval=200,            group=g5)
+g5 = "Affichage"
+show_str     = input.bool(true,  "Swings + BOS",              group=g5)
+show_nw_dots = input.bool(true,  "Dots nowick (trend aligné)", group=g5,
+               tooltip="Affiche uniquement les nowicks quand le trend est aligné — réduit le bruit")
+show_bg      = input.bool(true,  "Background tendance",       group=g5)
 
 // ─── BASE ─────────────────────────────────────────────────────────
 atr    = ta.atr(atr_len)
@@ -59,94 +65,92 @@ sma200 = ta.sma(close, 200)
 htf_bull = htf_ef > htf_es
 htf_bear = htf_ef < htf_es
 
-bar_h   = hour(time, "UTC")
-sess_ok = not use_sess or (bar_h >= sess_start and bar_h < sess_end)
 t_bull  = not use_htf or htf_bull
 t_bear  = not use_htf or htf_bear
 
-// ─── WICKLESS DETECTION ───────────────────────────────────────────
-body       = math.abs(close - open)
-up_wick    = high - math.max(open, close)
-dn_wick    = math.min(open, close) - low
-thresh     = body * (wick_max / 100.0)
-big_enough = body >= atr * min_body_atr
+bar_h   = hour(time, "UTC")
+sess_ok = not use_sess or (bar_h >= sess_start and bar_h < sess_end)
 
-wc_bear = close < open and dn_wick <= thresh and big_enough  // → SUPPORT
-wc_bull = close > open and up_wick <= thresh and big_enough  // → RÉSISTANCE
+// ─── SWING POINTS ─────────────────────────────────────────────────
+// ta.pivothigh/pivotlow : confirmation après swing_len barres de chaque côté
+// → détection retardée de swing_len barres (délai naturel, normal)
+ph = ta.pivothigh(high, swing_len, swing_len)
+pl = ta.pivotlow(low,  swing_len, swing_len)
 
-// ─── STATE MACHINE — SUPPORT ──────────────────────────────────────
-var float s_lvl   = na   // Niveau support = close du wc_bear
-var float s_low   = na   // Low du wc_bear → base pour SL
-var int   s_bar   = na
-var int   s_state = 0    // 0=off | 1=attente escape | 2=prêt retest
+var float last_ph = na
+var float last_pl = na
 
-if wc_bear
-    s_lvl   := close
-    s_low   := low
-    s_bar   := bar_index
-    s_state := 1
+if not na(ph)
+    last_ph := ph
+if not na(pl)
+    last_pl := pl
 
-if s_state == 1 and close > s_lvl + atr * escape_mult
-    s_state := 2
+// ─── MARKET STRUCTURE / BOS ───────────────────────────────────────
+var int trend = 0  // 1 = bull (HH+HL)  |  -1 = bear (LH+LL)
 
-if s_state >= 1 and close < s_lvl - atr * retest_zone * 2.0
-    s_state := 0
+// BOS = le CORPS de la bougie ferme au-delà du niveau
+// (wick seul = liquidity sweep = fake break → ignoré)
+bos_bull = not na(last_ph) and close > last_ph and close[1] <= last_ph
+bos_bear = not na(last_pl) and close < last_pl and close[1] >= last_pl
 
-if s_state >= 1 and not na(s_bar) and (bar_index - s_bar) > max_bars
-    s_state := 0
+if bos_bull
+    trend := 1
+if bos_bear
+    trend := -1
 
-// ─── STATE MACHINE — RÉSISTANCE ───────────────────────────────────
-var float r_lvl   = na
-var float r_high  = na
-var int   r_bar   = na
-var int   r_state = 0
+// ─── NOWICK DETECTION ─────────────────────────────────────────────
+body     = math.abs(close - open)
+up_wick  = high  - math.max(open, close)
+dn_wick  = math.min(open, close) - low
+thresh   = body * (wick_max / 100.0)
+big_bod  = body >= atr * min_body_atr
 
-if wc_bull
-    r_lvl   := close
-    r_high  := high
-    r_bar   := bar_index
-    r_state := 1
+// Bullish nowick : open ≈ low → support établi au niveau de l'open
+bull_nw = close > open and dn_wick <= thresh and big_bod
 
-if r_state == 1 and close < r_lvl - atr * escape_mult
-    r_state := 2
+// Bearish nowick : open ≈ high → résistance établie au niveau de l'open
+bear_nw = close < open and up_wick <= thresh and big_bod
 
-if r_state >= 1 and close > r_lvl + atr * retest_zone * 2.0
-    r_state := 0
+// ─── ZONE D'ENTRÉE ────────────────────────────────────────────────
+// BUY  : on est dans le pullback = en-dessous du HH ET au-dessus du HL
+//        zone_buf × ATR de tolérance sous le HL pour gérer les sweeps
+// SELL : on est dans le retracement = au-dessus du LL ET en-dessous du LH
+//        zone_buf × ATR de tolérance au-dessus du LH pour les sweeps
 
-if r_state >= 1 and not na(r_bar) and (bar_index - r_bar) > max_bars
-    r_state := 0
+in_bull_zone = not na(last_ph) and not na(last_pl) and
+               close < last_ph - atr * 0.3 and         // reculé du HH (pas de chasing)
+               close > last_pl - atr * zone_buf         // pas trop sous le HL (sweep ok)
+
+in_bear_zone = not na(last_ph) and not na(last_pl) and
+               close > last_pl + atr * 0.3 and          // retraité du LL (pas de chasing)
+               close < last_ph + atr * zone_buf          // pas trop au-dessus du LH (sweep ok)
 
 // ─── COOLDOWN ─────────────────────────────────────────────────────
 var int last_bar = na
 can_trade = na(last_bar) or (bar_index - last_bar) >= cooldown_b
 
 // ─── SIGNAUX ──────────────────────────────────────────────────────
-buy_signal = s_state == 2 and sess_ok and t_bull and can_trade and
-             low   <= s_lvl + atr * retest_zone and
-             close >= s_lvl - atr * retest_zone * 0.5 and
-             close > open
+// BUY  : nowick haussier + trend bull + dans la zone pullback
+// SELL : nowick baissier + trend bear + dans la zone retracement
+buy_sig  = bull_nw and trend == 1  and in_bull_zone and t_bull and sess_ok and can_trade
+sell_sig = bear_nw and trend == -1 and in_bear_zone and t_bear and sess_ok and can_trade
 
-sell_signal = r_state == 2 and sess_ok and t_bear and can_trade and
-              high  >= r_lvl - atr * retest_zone and
-              close <= r_lvl + atr * retest_zone * 0.5 and
-              close < open
-
-if buy_signal
-    s_state  := 0
+if buy_sig
     last_bar := bar_index
-
-if sell_signal
-    r_state  := 0
+if sell_sig
     last_bar := bar_index
 
 // ─── SL / TP ──────────────────────────────────────────────────────
-buy_sl  = buy_signal  ? s_low  - atr * sl_buf : na
-buy_tp1 = buy_signal  ? close  + (close - buy_sl)   * tp1_rr : na
-buy_tp2 = buy_signal  ? close  + (close - buy_sl)   * tp2_rr : na
+// SL : sous/au-dessus du low/high de la bougie nowick + buffer ATR
+// Pour un nowick haussier  : open ≈ low → SL sous le low
+// Pour un nowick baissier  : open ≈ high → SL au-dessus du high
+buy_sl   = buy_sig  ? low  - atr * sl_buf : na
+buy_tp1  = buy_sig  ? close + (close  - buy_sl)   * tp1_rr : na
+buy_tp2  = buy_sig  ? close + (close  - buy_sl)   * tp2_rr : na
 
-sell_sl  = sell_signal ? r_high + atr * sl_buf : na
-sell_tp1 = sell_signal ? close  - (sell_sl - close) * tp1_rr : na
-sell_tp2 = sell_signal ? close  - (sell_sl - close) * tp2_rr : na
+sell_sl  = sell_sig ? high + atr * sl_buf : na
+sell_tp1 = sell_sig ? close - (sell_sl - close) * tp1_rr : na
+sell_tp2 = sell_sig ? close - (sell_sl - close) * tp2_rr : na
 
 // ─── TRACKER DERNIER SIGNAL ───────────────────────────────────────
 var float t_sl    = na
@@ -156,7 +160,7 @@ var float t_entry = na
 var int   t_sbar  = na
 var bool  t_buy   = true
 
-if buy_signal
+if buy_sig
     t_sl    := buy_sl
     t_tp1   := buy_tp1
     t_tp2   := buy_tp2
@@ -164,7 +168,7 @@ if buy_signal
     t_sbar  := bar_index
     t_buy   := true
 
-if sell_signal
+if sell_sig
     t_sl    := sell_sl
     t_tp1   := sell_tp1
     t_tp2   := sell_tp2
@@ -172,7 +176,7 @@ if sell_signal
     t_sbar  := bar_index
     t_buy   := false
 
-// ─── LIGNES SL/TP avec labels ──────────────────────────────────────
+// ─── LIGNES SL/TP ─────────────────────────────────────────────────
 var line  ln_sl    = na
 var line  ln_entry = na
 var line  ln_tp1   = na
@@ -192,86 +196,113 @@ f_del_lines() =>
     if not na(lb_tp1)   label.delete(lb_tp1)
     if not na(lb_tp2)   label.delete(lb_tp2)
 
-if buy_signal or sell_signal
+if buy_sig or sell_sig
     f_del_lines()
-    x2 = bar_index + line_bars
-
-    _sl  = buy_signal ? buy_sl   : sell_sl
+    x2   = bar_index + line_bars
+    _sl  = buy_sig ? buy_sl   : sell_sl
     _en  = close
-    _tp1 = buy_signal ? buy_tp1  : sell_tp1
-    _tp2 = buy_signal ? buy_tp2  : sell_tp2
+    _tp1 = buy_sig ? buy_tp1  : sell_tp1
+    _tp2 = buy_sig ? buy_tp2  : sell_tp2
 
-    ln_sl    := line.new(bar_index, _sl,  x2, _sl,  color=color.new(color.red,    0), width=2, style=line.style_dashed,  extend=extend.none)
-    ln_entry := line.new(bar_index, _en,  x2, _en,  color=color.new(color.white,  0), width=2, style=line.style_solid,   extend=extend.none)
-    ln_tp1   := line.new(bar_index, _tp1, x2, _tp1, color=color.new(color.lime,   0), width=2, style=line.style_dashed,  extend=extend.none)
-    ln_tp2   := line.new(bar_index, _tp2, x2, _tp2, color=color.new(color.green,  0), width=1, style=line.style_dotted,  extend=extend.none)
+    ln_sl    := line.new(bar_index, _sl,  x2, _sl,  color=color.new(color.red,   0), width=2, style=line.style_dashed)
+    ln_entry := line.new(bar_index, _en,  x2, _en,  color=color.new(color.white, 0), width=2, style=line.style_solid)
+    ln_tp1   := line.new(bar_index, _tp1, x2, _tp1, color=color.new(color.lime,  0), width=2, style=line.style_dashed)
+    ln_tp2   := line.new(bar_index, _tp2, x2, _tp2, color=color.new(color.green, 0), width=1, style=line.style_dotted)
 
     _rr1 = math.round(math.abs(_tp1 - _en) / math.abs(_en - _sl), 1)
     _rr2 = math.round(math.abs(_tp2 - _en) / math.abs(_en - _sl), 1)
 
-    lb_sl    := label.new(x2, _sl,  "❌ SL  " + str.tostring(_sl,  "#.#####"),               color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
-    lb_entry := label.new(x2, _en,  "▶ ENTRY  " + str.tostring(_en, "#.#####"),              color=color.new(color.gray,  10), textcolor=color.white, style=label.style_label_left, size=size.small)
-    lb_tp1   := label.new(x2, _tp1, "✅ TP1  " + str.tostring(_tp1, "#.#####") + "  (" + str.tostring(_rr1) + "R)", color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
-    lb_tp2   := label.new(x2, _tp2, "🎯 TP2  " + str.tostring(_tp2, "#.#####") + "  (" + str.tostring(_rr2) + "R)", color=color.new(color.green, 10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    lb_sl    := label.new(x2, _sl,  "SL  "    + str.tostring(_sl,  "#.#####"),
+                 color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    lb_entry := label.new(x2, _en,  "ENTRY  " + str.tostring(_en,  "#.#####"),
+                 color=color.new(color.gray,  10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    lb_tp1   := label.new(x2, _tp1, "TP1  "   + str.tostring(_tp1, "#.#####") + "  (" + str.tostring(_rr1) + "R)",
+                 color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    lb_tp2   := label.new(x2, _tp2, "TP2  "   + str.tostring(_tp2, "#.#####") + "  (" + str.tostring(_rr2) + "R)",
+                 color=color.new(color.green, 10), textcolor=color.black, style=label.style_label_left, size=size.small)
 
-// Expire les lignes au-delà de line_bars
+// Supprime les lignes après expiry
 if not na(t_sbar) and (bar_index - t_sbar) > line_bars
     f_del_lines()
 
-// ─── VISUEL ───────────────────────────────────────────────────────
-// Signaux
-plotshape(buy_signal,  "BUY",  shape.labelup,   location.belowbar,
-     color.new(color.green, 0), text="BUY",  textcolor=color.white, size=size.normal)
-plotshape(sell_signal, "SELL", shape.labeldown, location.abovebar,
-     color.new(color.red, 0),   text="SELL", textcolor=color.white, size=size.normal)
+// ─── VISUELS STRUCTURE ────────────────────────────────────────────
+// Swings
+plotshape(show_str and not na(ph), "Swing High", shape.triangledown, location.abovebar,
+          color.new(color.red,   30), offset=-swing_len, size=size.tiny)
+plotshape(show_str and not na(pl), "Swing Low",  shape.triangleup,   location.belowbar,
+          color.new(color.green, 30), offset=-swing_len, size=size.tiny)
 
-// Niveaux S/R actifs (fade = waiting, bright = ready)
-plot(s_state >= 1 ? s_lvl : na, "Support",    color.new(color.lime, s_state == 2 ? 10 : 75), 1, plot.style_linebr)
-plot(r_state >= 1 ? r_lvl : na, "Résistance", color.new(color.red,  r_state == 2 ? 10 : 75), 1, plot.style_linebr)
+// BOS labels
+if show_str and bos_bull
+    label.new(bar_index, low - atr * 1.5, "BOS ↑",
+              color=color.new(color.green, 70), textcolor=color.green,
+              style=label.style_label_up, size=size.tiny)
+if show_str and bos_bear
+    label.new(bar_index, high + atr * 1.5, "BOS ↓",
+              color=color.new(color.red, 70), textcolor=color.red,
+              style=label.style_label_down, size=size.tiny)
+
+// Nowick dots — UNIQUEMENT quand le trend est aligné → élimine le bruit visuel
+plotshape(show_nw_dots and bull_nw and trend == 1,  "Bull NW", shape.circle,
+          location.belowbar, color.new(color.green, 40), size=size.tiny)
+plotshape(show_nw_dots and bear_nw and trend == -1, "Bear NW", shape.circle,
+          location.abovebar, color.new(color.red,   40), size=size.tiny)
+
+// Signaux d'entrée
+plotshape(buy_sig,  "BUY",  shape.labelup,   location.belowbar,
+          color.new(color.green, 0), text="BUY",  textcolor=color.white, size=size.normal)
+plotshape(sell_sig, "SELL", shape.labeldown, location.abovebar,
+          color.new(color.red,   0), text="SELL", textcolor=color.white, size=size.normal)
+
+// Background tendance (subtil)
+bgcolor(show_bg and trend ==  1 ? color.new(color.green, 95) :
+        show_bg and trend == -1 ? color.new(color.red,   95) : na, title="Tendance BG")
 
 // SMA 200
 plot(sma200, "SMA 200", color.new(color.yellow, 25), 2)
 
 // ─── TABLEAU ──────────────────────────────────────────────────────
 if barstate.islast
-    var table tb = table.new(position.top_right, 2, 8,
+    var table tb = table.new(position.top_right, 2, 9,
          bgcolor=color.new(color.black, 65),
          border_color=color.new(color.gray, 55), border_width=1,
          frame_color=color.new(color.gray, 40), frame_width=1)
 
-    table.cell(tb, 0, 0, "NOWICK", bgcolor=color.new(color.navy, 10), text_color=color.white,  text_size=size.small)
+    table.cell(tb, 0, 0, "NOWICK",  bgcolor=color.new(color.navy, 10), text_color=color.white,  text_size=size.small)
     table.cell(tb, 1, 0, "Brad.fx", bgcolor=color.new(color.navy, 10), text_color=color.yellow, text_size=size.small)
 
-    table.cell(tb, 0, 1, "1H Trend", text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 1, htf_bull ? "▲ BULL" : "▼ BEAR",
-         text_color=htf_bull ? color.lime : color.red, text_size=size.small)
+    table.cell(tb, 0, 1, "Trend",   text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 1, trend ==  1 ? "▲ BULL" : trend == -1 ? "▼ BEAR" : "— RANGE",
+         text_color=trend == 1 ? color.lime : trend == -1 ? color.red : color.gray, text_size=size.small)
 
-    table.cell(tb, 0, 2, "Session", text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 2, sess_ok ? "ON" : "OFF",
-         text_color=sess_ok ? color.lime : color.gray, text_size=size.small)
+    table.cell(tb, 0, 2, "HTF 1H",  text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 2, not use_htf ? "OFF" : htf_bull ? "▲ BULL" : "▼ BEAR",
+         text_color=not use_htf ? color.gray : htf_bull ? color.lime : color.red, text_size=size.small)
 
-    table.cell(tb, 0, 3, "Support",    text_color=color.silver, text_size=size.small)
-    s_txt = s_state == 2 ? "PRET" : s_state == 1 ? "escape..." : "—"
-    s_c   = s_state == 2 ? color.lime : s_state == 1 ? color.yellow : color.gray
-    table.cell(tb, 1, 3, s_txt, text_color=s_c, text_size=size.small)
+    table.cell(tb, 0, 3, "Session", text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 3, not use_sess ? "OFF" : sess_ok ? "ON" : "CLOSED",
+         text_color=not use_sess ? color.gray : sess_ok ? color.lime : color.orange, text_size=size.small)
 
-    table.cell(tb, 0, 4, "Résistance", text_color=color.silver, text_size=size.small)
-    r_txt = r_state == 2 ? "PRET" : r_state == 1 ? "escape..." : "—"
-    r_c   = r_state == 2 ? color.red : r_state == 1 ? color.yellow : color.gray
-    table.cell(tb, 1, 4, r_txt, text_color=r_c, text_size=size.small)
-
-    table.cell(tb, 0, 5, "SL",  text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 5, not na(t_sl)  ? str.tostring(t_sl,  "#.#####") : "—",
+    table.cell(tb, 0, 4, "Swing H", text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 4, not na(last_ph) ? str.tostring(last_ph, "#.#####") : "—",
          text_color=color.red, text_size=size.small)
 
-    table.cell(tb, 0, 6, "TP1", text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 6, not na(t_tp1) ? str.tostring(t_tp1, "#.#####") : "—",
+    table.cell(tb, 0, 5, "Swing L", text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 5, not na(last_pl) ? str.tostring(last_pl, "#.#####") : "—",
          text_color=color.lime, text_size=size.small)
 
-    table.cell(tb, 0, 7, "TP2", text_color=color.silver, text_size=size.small)
-    table.cell(tb, 1, 7, not na(t_tp2) ? str.tostring(t_tp2, "#.#####") : "—",
+    table.cell(tb, 0, 6, "SL",      text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 6, not na(t_sl)  ? str.tostring(t_sl,  "#.#####") : "—",
+         text_color=color.red, text_size=size.small)
+
+    table.cell(tb, 0, 7, "TP1",     text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 7, not na(t_tp1) ? str.tostring(t_tp1, "#.#####") : "—",
+         text_color=color.lime, text_size=size.small)
+
+    table.cell(tb, 0, 8, "TP2",     text_color=color.silver, text_size=size.small)
+    table.cell(tb, 1, 8, not na(t_tp2) ? str.tostring(t_tp2, "#.#####") : "—",
          text_color=color.green, text_size=size.small)
 
 // ─── ALERTES ──────────────────────────────────────────────────────
-alertcondition(buy_signal,  "Nowick BUY",  "Nowick BUY — retest support confirmé")
-alertcondition(sell_signal, "Nowick SELL", "Nowick SELL — retest résistance confirmé")
+alertcondition(buy_sig,  "Nowick BUY",  "Nowick BUY — structure HH/HL confirmée")
+alertcondition(sell_sig, "Nowick SELL", "Nowick SELL — structure LH/LL confirmée")
