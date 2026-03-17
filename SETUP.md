@@ -182,7 +182,124 @@ Le Nowick fonctionne mieux sur les paires avec :
 
 ---
 
+---
+
+## Nowick Confluence PRO — Multi-Pair Setup
+
+### Fichier : `nowick_confluence_pro.pine`
+
+Ce fichier est la réponse à la question **"pourquoi je rentre sur certains nowicks et pas d'autres"**.
+
+---
+
+### Pourquoi tu rentres sur CERTAINS nowicks
+
+Un nowick seul = niveau potentiel. Pas suffisant.
+
+Tu rentres quand il y a **confluence** :
+
+| Confluence | Définition | Pourquoi ça marche |
+|---|---|---|
+| **Gap Fill (FVG)** | Zone laissée vide entre 3 bougies (le marché a sauté) | Le marché *doit* revenir combler = aimant de prix |
+| **Rejection Zone** | Base d'une bougie impulsive (corps >= 2× ATR) | Zone où les market makers ont agi = niveau clé |
+
+**Si le retest d'un nowick tombe exactement dans un FVG ou une Rejection Zone → SIGNAL.**
+Sinon → pas de signal, même si le nowick est parfait.
+
+---
+
+### Déploiement Multi-Pair (5 charts = 5× le volume)
+
+**Étape 1 — Charger l'indicateur**
+```
+Pine Editor → Coller nowick_confluence_pro.pine → Add to chart
+```
+
+**Étape 2 — Ouvrir 5 charts en parallèle**
+```
+AUDUSD  15m  →  Charger l'indicateur
+EURUSD  15m  →  Charger l'indicateur
+GBPUSD  15m  →  Charger l'indicateur
+USDJPY  15m  →  Charger l'indicateur
+GBPJPY  15m  →  Charger l'indicateur
+```
+
+**Étape 3 — Créer les alertes TradingView (une fois par chart)**
+```
+Alerte → Condition : "Nowick CONFLUENCE ANY"
+Notification : App mobile + Email
+Message : laisser le message par défaut (inclut ticker + price + TF)
+```
+
+**Résultat :** Tu reçois une notification seulement quand un vrai setup apparaît sur n'importe laquelle des 5 paires. Pas de bruit, que des setups de qualité.
+
+---
+
+### Fréquence attendue
+
+| Paire | Setups/semaine (estimé) |
+|---|---|
+| AUDUSD | 1-2 |
+| EURUSD | 1-2 |
+| GBPUSD | 1-3 |
+| USDJPY | 1-2 |
+| GBPJPY | 2-3 |
+| **Total** | **6-12 setups/semaine** |
+
+Vs. l'ancien setup (AUDUSD seul) : 1-2 setups/semaine → **5× plus de volume, même qualité.**
+
+---
+
+### Paramètres recommandés par défaut
+
+```
+Mèche max            : 12%
+Corps min            : 0.4× ATR
+Retest fenêtre       : 15 barres
+Tolérance sweep      : 0.3× ATR
+FVG taille min       : 0.5× ATR
+Rejection impulse    : 2.0× ATR
+SL buffer            : 0.5× ATR
+TP1 RR               : 2.0
+TP2 RR               : 3.0
+Session              : 7h-17h UTC
+```
+
+### Si trop peu de signaux
+- Baisser `Corps min` à 0.3× ATR
+- Élargir `Tolérance sweep` à 0.5× ATR
+- Modifier le mode confluence : remplacer `and` par `or` dans le code (ligne indiquée)
+
+### Si trop de signaux
+- Monter `Rejection impulse` à 2.5× ATR
+- Réduire `Retest fenêtre` à 10 barres
+
+---
+
+### Interprétation de la table (coin haut droite)
+
+| Métrique | Description |
+|---|---|
+| Session | Vert = Londres/NY actif |
+| SMA 200 | BULL/BEAR = tendance de fond |
+| FVG actifs | Nombre de gaps en attente de fill |
+| Rej Zones | Nombre de zones de rejet actives |
+| NW pending | Nowick en attente de retest (avec âge) |
+| In Bull/Bear FVG | Prix actuellement dans un FVG |
+| In Rej Zone | Prix actuellement dans une zone de rejet |
+
+---
+
 ## Changelog
+
+**v3.0 — Confluence PRO**
+- Nouveau fichier `nowick_confluence_pro.pine`
+- Détection Fair Value Gap (FVG) avec zones visuelles
+- Détection Rejection Zones (bougies impulsives >= 2× ATR)
+- Signal uniquement si retest nowick + confluence FVG/REJ
+- Alertcondition multi-pair (1 alerte par chart, 5 paires)
+- Labels affichent le type de confluence (FVG, REJ, ou FVG+REJ)
+- Table info en temps réel avec état de toutes les confluences
 
 **v2.0**
 - HTF trend filter (EMA20/50 sur 1H) → +7-12% WR vs v1
