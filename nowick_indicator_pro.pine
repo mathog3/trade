@@ -1,157 +1,110 @@
 //@version=6
-indicator("Nowick — Brad.fx", overlay=true, max_bars_back=500)
+indicator("Brad.fx — EMA Pullback", overlay=true, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════
+// STRATÉGIE : EMA20 Pullback + Confirmation Nowick/Engulfing
+//
+// LOGIQUE :
+//   1. Trend  → price > EMA200 ET EMA20 > EMA50  (bull)
+//              price < EMA200 ET EMA20 < EMA50  (bear)
+//   2. Zone   → pullback jusqu'à l'EMA20 (low touche l'EMA20)
+//   3. Confirm→ bougie quasi-wickless OU engulfing dans la zone
+//   4. Filtre → session Londres/NY (07-17 UTC), max 1 trade/jour
+//   5. SL     → sous le swing low du pullback (EMA50) - buffer ATR
+//   6. TP     → 1:2 RR
+// ═══════════════════════════════════════════════════════════════════
 
 // ─── INPUTS ───────────────────────────────────────────────────────
-wick_pct    = input.float(1.5, "Mèche max (% corps)",    minval=0.0, maxval=5.0,  step=0.1,
-              tooltip="1.5% = quasi-wickless, ~1 signal/jour M15. 0% = zéro absolu (rare).")
-bos_len     = input.int(50,   "BOS lookback (barres)",   minval=20,  maxval=200)
-retest_bars = input.int(12,   "Fenêtre retest (barres)", minval=3,   maxval=20)
-sl_buf      = input.float(0.3,"SL buffer (× ATR)",       minval=0.1, maxval=1.0,  step=0.1)
-rr          = input.float(2.0,"RR (TP)",                 minval=1.0, maxval=5.0,  step=0.5)
-use_sess    = input.bool(true, "Session 07-17 UTC")
+show_emas = input.bool(false, "Afficher EMAs")
+use_sess  = input.bool(true,  "Session 07-17 UTC")
+
+// ─── EMAs ─────────────────────────────────────────────────────────
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+plot(show_emas ? ema20  : na, "EMA 20",  color=color.new(color.yellow, 0), linewidth=1)
+plot(show_emas ? ema50  : na, "EMA 50",  color=color.new(color.orange, 0), linewidth=1)
+plot(show_emas ? ema200 : na, "EMA 200", color=color.new(color.white,  0), linewidth=2)
 
 // ─── BASE ─────────────────────────────────────────────────────────
 atr     = ta.atr(14)
 body    = math.abs(close - open)
 dn_wick = math.min(open, close) - low
 up_wick = high - math.max(open, close)
-thresh  = body * (wick_pct / 100.0)
 
-// Brad.fx: corps = bougie momentum ≥ 0.6 ATR
-strong_body = body >= atr * 0.6
+// ─── TREND CONFIRMÉ (stack EMA) ───────────────────────────────────
+bull_trend = close > ema200 and ema20 > ema50
+bear_trend = close < ema200 and ema20 < ema50
 
-// ─── NOWICK STRICT (Brad.fx) ──────────────────────────────────────
-// Bull: bougie verte, mèche basse quasi-nulle, corps fort
-// Bear: bougie rouge, mèche haute quasi-nulle, corps fort
-bull_nw = close > open and dn_wick <= thresh and strong_body
-bear_nw = close < open and up_wick <= thresh and strong_body
+// ─── ZONE PULLBACK SUR EMA20 ──────────────────────────────────────
+// Bull : low touche l'EMA20 depuis le haut, close repasse au-dessus
+// Bear : high touche l'EMA20 depuis le bas, close repasse en-dessous
+zone_bull = low  <= ema20 + atr * 0.15 and close >= ema20
+zone_bear = high >= ema20 - atr * 0.15 and close <= ema20
 
-// ─── TREND via BOS ────────────────────────────────────────────────
-bos_hi = ta.highest(high, bos_len)[1]
-bos_lo = ta.lowest(low,   bos_len)[1]
+// ─── BOUGIE DE CONFIRMATION ───────────────────────────────────────
+// Nowick : mèche côté rejection < 15% du corps + corps fort (≥0.5 ATR)
+// Engulfing : close englobe le corps de la barre précédente
+strong = body >= atr * 0.5
 
-var int   trend   = 0
-var float hi_bull = na
-var float lo_bear = na
+nowick_bull = close > open and dn_wick <= body * 0.15 and strong
+nowick_bear = close < open and up_wick <= body * 0.15 and strong
+engulf_bull = close > open and close > open[1] and open < close[1] and strong
+engulf_bear = close < open and close < open[1] and open > close[1] and strong
 
-if close > bos_hi
-    trend   := 1
-    hi_bull := high
-else if trend == 1
-    hi_bull := math.max(hi_bull, high)
+confirm_bull = nowick_bull or engulf_bull
+confirm_bear = nowick_bear or engulf_bear
 
-if close < bos_lo
-    trend   := -1
-    lo_bear := low
-else if trend == -1
-    lo_bear := math.min(lo_bear, low)
+// ─── SIGNAL BRUT ──────────────────────────────────────────────────
+sess_ok  = not use_sess or (hour(time, "UTC") >= 7 and hour(time, "UTC") < 17)
+raw_buy  = bull_trend and zone_bull and confirm_bull and sess_ok
+raw_sell = bear_trend and zone_bear and confirm_bear and sess_ok
 
-// Pullback confirmé : nowick se forme pendant un recul dans le trend
-in_pb_buy  = trend == 1  and not na(hi_bull) and close <= hi_bull - atr * 0.3
-in_pb_sell = trend == -1 and not na(lo_bear) and close >= lo_bear  + atr * 0.3
+// ─── MAX 1 SIGNAL PAR JOUR ────────────────────────────────────────
+var int last_date = 0
+cur_date = year * 10000 + month * 100 + dayofmonth
+no_trade_today = cur_date != last_date
 
-// ─── NOWICK VALIDE ────────────────────────────────────────────────
-valid_bull = bull_nw and in_pb_buy
-valid_bear = bear_nw and in_pb_sell
-
-// ─── STOCKAGE NIVEAU ──────────────────────────────────────────────
-var float nw_buy_lo = na   // low du nowick candle bull → niveau de support
-var int   nw_buy_b  = na
-var float nw_sel_hi = na   // high du nowick candle bear → niveau de résistance
-var int   nw_sel_b  = na
-
-if valid_bull
-    nw_buy_lo := low
-    nw_buy_b  := bar_index
-if valid_bear
-    nw_sel_hi := high
-    nw_sel_b  := bar_index
-
-age_buy  = na(nw_buy_b) ? na : bar_index - nw_buy_b
-age_sell = na(nw_sel_b) ? na : bar_index - nw_sel_b
-
-// Expiration du setup
-if not na(age_buy)  and age_buy  > retest_bars then nw_buy_lo := na, nw_buy_b  := na
-if not na(age_sell) and age_sell > retest_bars then nw_sel_hi := na, nw_sel_b  := na
-
-// Invalidation stricte : close casse le niveau → setup annulé
-if not na(nw_buy_lo) and close < nw_buy_lo then nw_buy_lo := na, nw_buy_b := na
-if not na(nw_sel_hi) and close > nw_sel_hi then nw_sel_hi := na, nw_sel_b := na
-
-// ─── RETEST (Brad.fx) ─────────────────────────────────────────────
-// Le retest doit:
-//   1. Toucher le niveau (low ≤ nw_buy_lo + micro-tolérance)
-//   2. Fermer AU-DESSUS du niveau (confirmation → les acheteurs ont défendu)
-retest_buy  = not na(nw_buy_lo) and age_buy  > 0 and age_buy  <= retest_bars
-              and low  <= nw_buy_lo + atr * 0.1
-              and close > nw_buy_lo
-
-retest_sell = not na(nw_sel_hi) and age_sell > 0 and age_sell <= retest_bars
-              and high >= nw_sel_hi - atr * 0.1
-              and close < nw_sel_hi
-
-// ─── SESSION ──────────────────────────────────────────────────────
-sess_ok = not use_sess or (hour(time, "UTC") >= 7 and hour(time, "UTC") < 17)
-
-// ─── SIGNAUX ──────────────────────────────────────────────────────
-buy_sig  = retest_buy  and sess_ok
-sell_sig = retest_sell and sess_ok
-
-// ─── SL / TP (Brad.fx : SL sous nowick, TP = 1:2) ─────────────────
-// SL: juste sous le LOW du nowick candle (pas du retest bar)
-buy_sl    = buy_sig  ? nw_buy_lo - atr * sl_buf : na
-sell_sl   = sell_sig ? nw_sel_hi + atr * sl_buf : na
-buy_risk  = not na(buy_sl)  ? close - buy_sl  : na
-sell_risk = not na(sell_sl) ? sell_sl - close : na
-buy_tp    = not na(buy_risk)  ? close + buy_risk  * rr : na
-sell_tp   = not na(sell_risk) ? close - sell_risk * rr : na
-
-// Consommer le niveau après signal
-if buy_sig  then nw_buy_lo := na, nw_buy_b  := na
-if sell_sig then nw_sel_hi := na, nw_sel_b  := na
-
-// ─── LIGNES SL/TP ─────────────────────────────────────────────────
-var line  ln_sl = na
-var line  ln_en = na
-var line  ln_tp = na
-var label lb_sl = na
-var label lb_tp = na
-var label lb_en = na
+buy_sig  = raw_buy  and no_trade_today
+sell_sig = raw_sell and no_trade_today
 
 if buy_sig or sell_sig
-    if not na(ln_sl) then line.delete(ln_sl)
-    if not na(ln_en) then line.delete(ln_en)
-    if not na(ln_tp) then line.delete(ln_tp)
-    if not na(lb_sl) then label.delete(lb_sl)
-    if not na(lb_tp) then label.delete(lb_tp)
-    if not na(lb_en) then label.delete(lb_en)
+    last_date := cur_date
 
-    x2  = bar_index + 80
-    _sl = buy_sig ? buy_sl  : sell_sl
-    _tp = buy_sig ? buy_tp  : sell_tp
-    _rr = "TP " + str.tostring(rr, "#.#") + "R"
+// ─── SL / TP ──────────────────────────────────────────────────────
+// SL : sous le plus bas entre EMA50 et le low courant - buffer
+// TP : 2× le risque (1:2 RR)
+buy_sl    = buy_sig  ? math.min(ema50, low)  - atr * 0.3 : na
+sell_sl   = sell_sig ? math.max(ema50, high) + atr * 0.3 : na
+buy_risk  = not na(buy_sl)  ? close - buy_sl  : na
+sell_risk = not na(sell_sl) ? sell_sl - close : na
+buy_tp    = not na(buy_risk)  ? close + buy_risk  * 2.0 : na
+sell_tp   = not na(sell_risk) ? close - sell_risk * 2.0 : na
 
-    ln_en := line.new(bar_index, close, x2, close, color=color.new(color.white, 40), width=1)
-    ln_sl := line.new(bar_index, _sl,   x2, _sl,   color=color.new(color.red,    0), width=2, style=line.style_dashed)
-    ln_tp := line.new(bar_index, _tp,   x2, _tp,   color=color.new(color.lime,   0), width=2, style=line.style_dashed)
-
-    lb_en := label.new(x2, close, "ENT", color=color.new(color.white,30), textcolor=color.white, style=label.style_label_left, size=size.small)
-    lb_sl := label.new(x2, _sl,   "SL",  color=color.new(color.red,  10), textcolor=color.white, style=label.style_label_left, size=size.small)
-    lb_tp := label.new(x2, _tp,   _rr,   color=color.new(color.lime, 10), textcolor=color.black, style=label.style_label_left, size=size.small)
-
-// ─── VISUELS ──────────────────────────────────────────────────────
+// ─── LABELS AVEC TP/SL EN PRIX (pas de lignes) ────────────────────
 if buy_sig
-    label.new(bar_index, low, "BUY",
-              yloc=yloc.price, color=color.new(color.green,0),
-              textcolor=color.white, style=label.style_label_up, size=size.normal)
-if sell_sig
-    label.new(bar_index, high, "SELL",
-              yloc=yloc.price, color=color.new(color.red,0),
-              textcolor=color.white, style=label.style_label_down, size=size.normal)
+    _tp  = str.tostring(buy_tp,  format.mintick)
+    _sl  = str.tostring(buy_sl,  format.mintick)
+    _txt = "BUY\nTP → " + _tp + "\nSL → " + _sl
+    label.new(bar_index, low, _txt,
+              yloc=yloc.price,
+              color=color.new(color.green, 0),
+              textcolor=color.white,
+              style=label.style_label_up,
+              size=size.normal)
 
-// ─── PLOT REQUIS PAR TRADINGVIEW ──────────────────────────────────
-plot(na)
+if sell_sig
+    _tp  = str.tostring(sell_tp, format.mintick)
+    _sl  = str.tostring(sell_sl, format.mintick)
+    _txt = "SELL\nTP → " + _tp + "\nSL → " + _sl
+    label.new(bar_index, high, _txt,
+              yloc=yloc.price,
+              color=color.new(color.red, 0),
+              textcolor=color.white,
+              style=label.style_label_down,
+              size=size.normal)
 
 // ─── ALERTES ──────────────────────────────────────────────────────
-alertcondition(buy_sig,  "ENTRÉE BUY",  "Nowick BUY — retest tenu — 1:2")
-alertcondition(sell_sig, "ENTRÉE SELL", "Nowick SELL — retest tenu — 1:2")
+alertcondition(buy_sig,  "BUY  — EMA20 Pullback", "Brad.fx BUY  — EMA20 Pullback confirmé")
+alertcondition(sell_sig, "SELL — EMA20 Pullback", "Brad.fx SELL — EMA20 Pullback confirmé")
