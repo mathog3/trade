@@ -1,0 +1,472 @@
+// ============================================================================
+// HUSS ICT INDICES — AMD + SMT + IFVG + H1 Liquidity
+// Inspiré de l'approche ICT / Huss.trades
+// Marché cible : NQ, ES, DAX, DOW, FTSE (indices futures)
+// ============================================================================
+// LOGIQUE :
+//   1. AMD  — détecte accumulation → manipulation (faux break) → signal
+//   2. SMT  — divergence entre 2 indices corrélés = manipulation confirmée
+//   3. IFVG — FVG violé qui flip = zone d'entrée haute probabilité
+//   4. H1 Liq — wicks horaires = pools de liquidité (cibles + contexte)
+//   5. SIGNAL — seulement quand tout s'aligne → entry / SL / TP précis
+// ============================================================================
+
+//@version=6
+indicator("Huss ICT Indices — AMD+SMT+IFVG", overlay=true,
+          max_bars_back=500, max_labels_count=300,
+          max_lines_count=400, max_boxes_count=300)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+g_smt = "── SMT (Smart Money Technique) ──"
+smt_ticker   = input.symbol("ES1!", "Paire SMT corrélée",   group=g_smt,
+               tooltip="NQ → ES1! | ES → NQ1! | DAX → EUSTX50 | DOW → ES1!")
+smt_lookback = input.int(5,  "Lookback divergence (barres)", minval=2, maxval=20, group=g_smt,
+               tooltip="Fenêtre pour comparer les highs/lows entre les 2 indices.")
+smt_min_atr  = input.float(0.5, "Divergence min (× ATR)", minval=0.1, maxval=3, step=0.1, group=g_smt,
+               tooltip="Écart minimum entre les 2 indices pour valider le SMT.")
+
+g_amd = "── AMD (Accumulation / Manipulation) ──"
+range_bars   = input.int(20,   "Barres accumulation (range)", minval=8,  maxval=60, group=g_amd,
+               tooltip="Nombre de barres pour détecter un range de consolidation.")
+range_atr    = input.float(1.5,"Largeur max range (× ATR)",  minval=0.5, maxval=5, step=0.1, group=g_amd,
+               tooltip="Range compris dans X × ATR = zone d'accumulation.")
+manip_pct    = input.float(0.3,"Break manipulation (× ATR)", minval=0.1, maxval=2, step=0.1, group=g_amd,
+               tooltip="Dépassement minimum au-delà du range pour valider la manipulation.")
+
+g_fvg = "── FVG / IFVG ──"
+use_fvg      = input.bool(true,  "Activer FVG",              group=g_fvg)
+use_ifvg     = input.bool(true,  "Activer IFVG (FVG flippé)", group=g_fvg,
+               tooltip="Quand un FVG est violé → devient résistance/support inversé = IFVG.")
+fvg_min_atr  = input.float(0.2,  "Taille min FVG (× ATR)",  minval=0.05, maxval=3, step=0.05, group=g_fvg)
+fvg_bars     = input.int(80,     "Mémoire FVG (barres)",     minval=10, maxval=300, group=g_fvg)
+show_fvg     = input.bool(true,  "Afficher FVG",             group=g_fvg)
+show_ifvg    = input.bool(true,  "Afficher IFVG",            group=g_fvg)
+
+g_liq = "── Liquidité H1 (wicks horaires) ──"
+use_h1_liq   = input.bool(true,  "Activer pools liquidité H1", group=g_liq,
+               tooltip="Wicks des bougies H1 = pools de liquidité institutionnelle.")
+liq_lookback = input.int(8,      "Bougies H1 à analyser",    minval=3, maxval=30, group=g_liq)
+show_liq     = input.bool(true,  "Afficher niveaux liquidité", group=g_liq)
+liq_bars_ext = input.int(40,     "Extension lignes liquidité", minval=10, maxval=100, group=g_liq)
+
+g_sig = "── Signal & Filtre ──"
+atr_len      = input.int(14,   "ATR length",                  minval=5,  group=g_sig)
+cooldown_bars= input.int(20,   "Cooldown entre signaux",      minval=5, maxval=60, group=g_sig,
+               tooltip="Évite les signaux en rafale. ICT : qualité > quantité.")
+use_sess     = input.bool(true, "Session NY uniquement (14h-23h UTC)", group=g_sig,
+               tooltip="NQ/ES : session NY = meilleure liquidité. 14h-23h UTC.")
+
+g_tp = "── SL / TP ──"
+sl_lookback  = input.int(6,    "SL structure lookback",       minval=3, maxval=20, group=g_tp)
+sl_buf       = input.float(0.2,"SL buffer (× ATR)",          minval=0, maxval=2, step=0.1, group=g_tp)
+tp1_rr       = input.float(2.0,"TP1 RR",                     minval=0.5, maxval=10, step=0.5, group=g_tp)
+tp2_rr       = input.float(3.5,"TP2 RR",                     minval=0.5, maxval=15, step=0.5, group=g_tp)
+
+// ============================================================================
+// BASE
+// ============================================================================
+
+atr     = ta.atr(atr_len)
+sess_ok = not use_sess or (hour(time, "UTC") >= 14 and hour(time, "UTC") < 23)
+
+body    = math.abs(close - open)
+up_wick = high - math.max(open, close)
+dn_wick = math.min(open, close) - low
+rng     = high - low
+
+// ============================================================================
+// SMT — DIVERGENCE ENTRE 2 INDICES
+// ============================================================================
+// Bull SMT : ton indice fait un NEW LOW mais le ticker SMT ne le fait PAS
+//            → le breakout baissier est une manipulation → move haussier réel
+// Bear SMT : ton indice fait un NEW HIGH mais le ticker SMT ne le fait PAS
+//            → le breakout haussier est une manipulation → move baissier réel
+
+[smt_hi, smt_lo] = request.security(smt_ticker, timeframe.period,
+                    [high, low], lookahead=barmerge.lookahead_off)
+
+lo_main = ta.lowest(low,  smt_lookback)
+hi_main = ta.highest(high, smt_lookback)
+lo_smt  = ta.lowest(smt_lo,  smt_lookback)
+hi_smt  = ta.highest(smt_hi, smt_lookback)
+
+// New low sur indice principal mais PAS sur SMT → manipulation baissière
+smt_bull = low  <= lo_main and smt_lo > lo_smt - atr * smt_min_atr and
+           low  <  low[1]  and smt_lo >= smt_lo[1]
+
+// New high sur indice principal mais PAS sur SMT → manipulation haussière
+smt_bear = high >= hi_main and smt_hi < hi_smt + atr * smt_min_atr and
+           high >  high[1] and smt_hi <= smt_hi[1]
+
+var int last_smt_bull = -999
+var int last_smt_bear = -999
+
+if smt_bull
+    last_smt_bull := bar_index
+if smt_bear
+    last_smt_bear := bar_index
+
+// SMT récent = valide sur les X dernières barres
+smt_bull_active = bar_index - last_smt_bull <= range_bars
+smt_bear_active = bar_index - last_smt_bear <= range_bars
+
+// ============================================================================
+// AMD — ACCUMULATION + DÉTECTION MANIPULATION
+// ============================================================================
+// Accumulation = range comprimé sur range_bars barres
+// Manipulation = faux break du range (stop hunt) avant le vrai move
+
+range_hi = ta.highest(high, range_bars)
+range_lo = ta.lowest(low,   range_bars)
+range_sz = range_hi - range_lo
+
+in_accumulation = range_sz <= atr * range_atr
+
+// Faux break haussier = price dépasse range_hi puis revient dedans → manipulation baissière
+manip_bear = in_accumulation and high > range_hi and
+             high > range_hi + atr * manip_pct and close < range_hi
+
+// Faux break baissier = price passe sous range_lo puis revient dedans → manipulation haussière
+manip_bull = in_accumulation and low < range_lo and
+             low < range_lo - atr * manip_pct and close > range_lo
+
+var int last_manip_bull = -999
+var int last_manip_bear = -999
+
+if manip_bull
+    last_manip_bull := bar_index
+if manip_bear
+    last_manip_bear := bar_index
+
+manip_bull_active = bar_index - last_manip_bull <= range_bars
+manip_bear_active = bar_index - last_manip_bear <= range_bars
+
+// ============================================================================
+// FVG (Fair Value Gap)
+// ============================================================================
+
+bull_fvg_ok = low[0] > high[2] and (low[0] - high[2]) >= atr * fvg_min_atr
+bear_fvg_ok = high[0] < low[2] and (low[2] - high[0]) >= atr * fvg_min_atr
+
+// Stockage FVG bull
+var float[] bfvg_hi  = array.new_float(0)
+var float[] bfvg_lo  = array.new_float(0)
+var int[]   bfvg_age = array.new_int(0)
+var bool[]  bfvg_flipped = array.new_bool(0)   // true = IFVG
+
+// Stockage FVG bear
+var float[] sfvg_hi  = array.new_float(0)
+var float[] sfvg_lo  = array.new_float(0)
+var int[]   sfvg_age = array.new_int(0)
+var bool[]  sfvg_flipped = array.new_bool(0)   // true = IFVG
+
+if use_fvg and bull_fvg_ok
+    array.unshift(bfvg_hi,      high[2])
+    array.unshift(bfvg_lo,      low[0])
+    array.unshift(bfvg_age,     bar_index)
+    array.unshift(bfvg_flipped, false)
+
+if use_fvg and bear_fvg_ok
+    array.unshift(sfvg_hi,      high[0])
+    array.unshift(sfvg_lo,      low[2])
+    array.unshift(sfvg_age,     bar_index)
+    array.unshift(sfvg_flipped, false)
+
+// ── IFVG : détection flip ────────────────────────────────────────────────────
+// Bull FVG violé par le bas → flip → IFVG baissier
+i_b = 0
+while i_b < array.size(bfvg_age)
+    age_b = bar_index - array.get(bfvg_age, i_b)
+    if age_b > fvg_bars
+        array.remove(bfvg_hi, i_b)
+        array.remove(bfvg_lo, i_b)
+        array.remove(bfvg_age, i_b)
+        array.remove(bfvg_flipped, i_b)
+    else
+        // Flip si prix casse sous le bas du FVG
+        if use_ifvg and not array.get(bfvg_flipped, i_b) and close < array.get(bfvg_lo, i_b)
+            array.set(bfvg_flipped, i_b, true)
+        i_b += 1
+
+// Bear FVG violé par le haut → flip → IFVG haussier
+i_s = 0
+while i_s < array.size(sfvg_age)
+    age_s = bar_index - array.get(sfvg_age, i_s)
+    if age_s > fvg_bars
+        array.remove(sfvg_hi, i_s)
+        array.remove(sfvg_lo, i_s)
+        array.remove(sfvg_age, i_s)
+        array.remove(sfvg_flipped, i_s)
+    else
+        // Flip si prix casse au-dessus du haut du FVG
+        if use_ifvg and not array.get(sfvg_flipped, i_s) and close > array.get(sfvg_hi, i_s)
+            array.set(sfvg_flipped, i_s, true)
+        i_s += 1
+
+// ── Prix dans zone FVG ou IFVG ───────────────────────────────────────────────
+price_in_bull_fvg  = false   // FVG normal haussier
+price_in_bull_ifvg = false   // Bear FVG flippé → IFVG haussier
+price_in_bear_fvg  = false
+price_in_bear_ifvg = false
+
+if array.size(bfvg_hi) > 0
+    for k = 0 to array.size(bfvg_hi) - 1
+        flipped = array.get(bfvg_flipped, k)
+        hi_k    = array.get(bfvg_hi, k)
+        lo_k    = array.get(bfvg_lo, k)
+        if not flipped
+            // FVG bull normal : prix touche la zone par en bas
+            if low <= hi_k and close >= lo_k
+                price_in_bull_fvg := true
+        // Note: bull FVG flippé = résistance baissière → géré dans sfvg
+
+if array.size(sfvg_hi) > 0
+    for k = 0 to array.size(sfvg_hi) - 1
+        flipped = array.get(sfvg_flipped, k)
+        hi_k    = array.get(sfvg_hi, k)
+        lo_k    = array.get(sfvg_lo, k)
+        if not flipped
+            // FVG bear normal
+            if high >= lo_k and close <= hi_k
+                price_in_bear_fvg := true
+        else
+            // Bear FVG flippé = IFVG haussier : prix retrace dans la zone
+            if low <= hi_k and close >= lo_k
+                price_in_bull_ifvg := true
+
+// Bull FVG flippé = IFVG baissier
+if array.size(bfvg_hi) > 0
+    for k = 0 to array.size(bfvg_hi) - 1
+        if array.get(bfvg_flipped, k)
+            hi_k = array.get(bfvg_hi, k)
+            lo_k = array.get(bfvg_lo, k)
+            if high >= lo_k and close <= hi_k
+                price_in_bear_ifvg := true
+
+// ── Affichage FVG / IFVG ─────────────────────────────────────────────────────
+if show_fvg and bull_fvg_ok
+    box.new(bar_index - 2, low[0], bar_index + 30, high[2],
+            border_color=color.new(color.teal, 50),
+            bgcolor=color.new(color.teal, 82), border_width=1)
+
+if show_fvg and bear_fvg_ok
+    box.new(bar_index - 2, low[2], bar_index + 30, high[0],
+            border_color=color.new(color.orange, 50),
+            bgcolor=color.new(color.orange, 82), border_width=1)
+
+// IFVG = même zone, couleur différente — dessiner quand le flip se produit
+if show_ifvg and use_ifvg
+    if array.size(bfvg_hi) > 0
+        for k = 0 to array.size(bfvg_hi) - 1
+            // On dessine l'IFVG dès que le flip vient de se produire (age recalc)
+            if array.get(bfvg_flipped, k) and (bar_index - array.get(bfvg_age, k)) == 1
+                box.new(array.get(bfvg_age, k), array.get(bfvg_lo, k),
+                        bar_index + 30, array.get(bfvg_hi, k),
+                        border_color=color.new(color.red, 40),
+                        bgcolor=color.new(color.red, 85), border_width=1,
+                        border_style=line.style_dashed)
+    if array.size(sfvg_hi) > 0
+        for k = 0 to array.size(sfvg_hi) - 1
+            if array.get(sfvg_flipped, k) and (bar_index - array.get(sfvg_age, k)) == 1
+                box.new(array.get(sfvg_age, k), array.get(sfvg_lo, k),
+                        bar_index + 30, array.get(sfvg_hi, k),
+                        border_color=color.new(color.lime, 40),
+                        bgcolor=color.new(color.lime, 85), border_width=1,
+                        border_style=line.style_dashed)
+
+// ============================================================================
+// LIQUIDITÉ H1 — WICKS HORAIRES
+// ============================================================================
+// Les wicks des bougies H1 = zones où la liquidité s'est accumulée
+// Prix va souvent sweeper ces niveaux avant de partir dans la direction réelle
+
+[h1_hi, h1_lo, h1_close] = request.security(syminfo.tickerid, "60",
+                             [high, low, close], lookahead=barmerge.lookahead_off)
+
+h1_wick_hi = ta.highest(h1_hi, liq_lookback)   // pool liquidité haussière
+h1_wick_lo = ta.lowest(h1_lo,  liq_lookback)   // pool liquidité baissière
+
+if show_liq and use_h1_liq and barstate.islast
+    line.new(bar_index - liq_lookback * 4, h1_wick_hi,
+             bar_index + liq_bars_ext,     h1_wick_hi,
+             color=color.new(color.yellow, 20), width=1, style=line.style_dotted)
+    line.new(bar_index - liq_lookback * 4, h1_wick_lo,
+             bar_index + liq_bars_ext,     h1_wick_lo,
+             color=color.new(color.yellow, 20), width=1, style=line.style_dotted)
+    label.new(bar_index + liq_bars_ext, h1_wick_hi, "💧 Liq H1",
+              yloc=yloc.price, color=color.new(color.yellow, 80),
+              textcolor=color.yellow, style=label.style_label_left, size=size.tiny)
+    label.new(bar_index + liq_bars_ext, h1_wick_lo, "💧 Liq H1",
+              yloc=yloc.price, color=color.new(color.yellow, 80),
+              textcolor=color.yellow, style=label.style_label_left, size=size.tiny)
+
+// Prix proche d'un pool de liquidité H1
+near_hi_liq = math.abs(high - h1_wick_hi) <= atr * 0.5
+near_lo_liq = math.abs(low  - h1_wick_lo) <= atr * 0.5
+
+// ============================================================================
+// CONFLUENCE & SIGNAL FINAL
+// ============================================================================
+// BUY  : manip baissière (faux break low) + SMT bull + (FVG bull ou IFVG bull)
+// SELL : manip haussière (faux break high) + SMT bear + (FVG bear ou IFVG bear)
+
+bull_zone = price_in_bull_fvg or price_in_bull_ifvg
+bear_zone = price_in_bear_fvg or price_in_bear_ifvg
+
+var int last_buy_bar  = -999
+var int last_sell_bar = -999
+
+cd_buy  = bar_index - last_buy_bar  >= cooldown_bars
+cd_sell = bar_index - last_sell_bar >= cooldown_bars
+
+// Signal BUY : manipulation low confirmée par SMT + prix dans zone haussière
+buy_sig = manip_bull_active and smt_bull_active and bull_zone and sess_ok and cd_buy
+
+// Signal SELL : manipulation high confirmée par SMT + prix dans zone baissière
+sell_sig = manip_bear_active and smt_bear_active and bear_zone and sess_ok and cd_sell
+
+if buy_sig
+    last_buy_bar  := bar_index
+if sell_sig
+    last_sell_bar := bar_index
+
+// ============================================================================
+// SL / TP
+// ============================================================================
+
+struct_sl_buy  = ta.lowest(low,   sl_lookback)
+struct_sl_sell = ta.highest(high, sl_lookback)
+
+buy_sl  = buy_sig  ? struct_sl_buy  - atr * sl_buf : na
+sell_sl = sell_sig ? struct_sl_sell + atr * sl_buf : na
+
+buy_risk = not na(buy_sl)  ? close - buy_sl  : na
+sel_risk = not na(sell_sl) ? sell_sl - close : na
+
+buy_tp1  = not na(buy_risk) ? close + buy_risk * tp1_rr : na
+buy_tp2  = not na(buy_risk) ? close + buy_risk * tp2_rr : na
+sell_tp1 = not na(sel_risk) ? close - sel_risk * tp1_rr : na
+sell_tp2 = not na(sel_risk) ? close - sel_risk * tp2_rr : na
+
+// ============================================================================
+// LABELS
+// ============================================================================
+
+if buy_sig
+    zone_str = price_in_bull_ifvg ? "IFVG" : "FVG"
+    label.new(bar_index, low - atr * 1.0,
+              "▲ BUY [SMT + " + zone_str + "]\n" +
+              "Entry   " + str.tostring(close,   format.mintick) + "\n" +
+              "TP1     " + str.tostring(buy_tp1, format.mintick) + "\n" +
+              "TP2     " + str.tostring(buy_tp2, format.mintick) + "\n" +
+              "SL      " + str.tostring(buy_sl,  format.mintick) + "\n" +
+              "Manip   ✓ | SMT ✓",
+              yloc=yloc.price, color=color.new(color.green, 0),
+              textcolor=color.white, style=label.style_label_up, size=size.normal)
+    line.new(bar_index, buy_tp1, bar_index + 50, buy_tp1, color=color.new(color.lime,  10), width=2, style=line.style_dashed)
+    line.new(bar_index, buy_tp2, bar_index + 50, buy_tp2, color=color.new(color.teal,  10), width=1, style=line.style_dashed)
+    line.new(bar_index, close,   bar_index + 50, close,   color=color.new(color.white, 40), width=1, style=line.style_dotted)
+    line.new(bar_index, buy_sl,  bar_index + 50, buy_sl,  color=color.new(color.red,   10), width=2, style=line.style_dashed)
+
+if sell_sig
+    zone_str = price_in_bear_ifvg ? "IFVG" : "FVG"
+    label.new(bar_index, high + atr * 1.0,
+              "▼ SELL [SMT + " + zone_str + "]\n" +
+              "Entry   " + str.tostring(close,    format.mintick) + "\n" +
+              "TP1     " + str.tostring(sell_tp1, format.mintick) + "\n" +
+              "TP2     " + str.tostring(sell_tp2, format.mintick) + "\n" +
+              "SL      " + str.tostring(sell_sl,  format.mintick) + "\n" +
+              "Manip   ✓ | SMT ✓",
+              yloc=yloc.price, color=color.new(color.red, 0),
+              textcolor=color.white, style=label.style_label_down, size=size.normal)
+    line.new(bar_index, sell_tp1, bar_index + 50, sell_tp1, color=color.new(color.lime,  10), width=2, style=line.style_dashed)
+    line.new(bar_index, sell_tp2, bar_index + 50, sell_tp2, color=color.new(color.teal,  10), width=1, style=line.style_dashed)
+    line.new(bar_index, close,    bar_index + 50, close,    color=color.new(color.white, 40), width=1, style=line.style_dotted)
+    line.new(bar_index, sell_sl,  bar_index + 50, sell_sl,  color=color.new(color.red,   10), width=2, style=line.style_dashed)
+
+// ============================================================================
+// VISUELS AMD
+// ============================================================================
+
+// Zone d'accumulation (range en cours)
+bgcolor(in_accumulation ? color.new(color.gray, 93) : na, title="Zone accumulation")
+
+// Signal manipulation
+plotshape(manip_bull, "Manip Bull", shape.xcross, location.belowbar,
+          color.new(color.aqua, 20), size=size.tiny, title="Faux break baissier")
+plotshape(manip_bear, "Manip Bear", shape.xcross, location.abovebar,
+          color.new(color.fuchsia, 20), size=size.tiny, title="Faux break haussier")
+
+// Signal SMT
+plotshape(smt_bull, "SMT Bull", shape.diamond, location.belowbar,
+          color.new(color.lime, 10), size=size.tiny, title="SMT divergence bull")
+plotshape(smt_bear, "SMT Bear", shape.diamond, location.abovebar,
+          color.new(color.red, 10), size=size.tiny, title="SMT divergence bear")
+
+// ============================================================================
+// TABLE INFO
+// ============================================================================
+
+var table info = table.new(position.top_right, 2, 11,
+     bgcolor=color.new(color.black, 75),
+     border_color=color.new(color.gray, 50), border_width=1)
+
+if barstate.islast
+    table.cell(info, 0, 0, "HUSS ICT",      text_color=color.white,  text_size=size.small,
+               bgcolor=color.new(color.navy, 20), text_halign=text.align_center)
+    table.cell(info, 1, 0, syminfo.ticker,  text_color=color.yellow, text_size=size.small,
+               bgcolor=color.new(color.navy, 20), text_halign=text.align_center)
+
+    table.cell(info, 0, 1, "Session NY",    text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 1, sess_ok ? "✓ Active" : "✗ Fermée",
+               text_color=sess_ok ? color.lime : color.red, text_size=size.small)
+
+    table.cell(info, 0, 2, "Accumulation",  text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 2, in_accumulation ? "✓ Range" : "— Trend",
+               text_color=in_accumulation ? color.aqua : color.gray, text_size=size.small)
+
+    table.cell(info, 0, 3, "Manip Bull",   text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 3, manip_bull_active ? "✓ Active" : "—",
+               text_color=manip_bull_active ? color.lime : color.gray, text_size=size.small)
+
+    table.cell(info, 0, 4, "Manip Bear",   text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 4, manip_bear_active ? "✓ Active" : "—",
+               text_color=manip_bear_active ? color.red : color.gray, text_size=size.small)
+
+    table.cell(info, 0, 5, "SMT Bull",     text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 5, smt_bull_active ? "✓ " + smt_ticker : "—",
+               text_color=smt_bull_active ? color.lime : color.gray, text_size=size.small)
+
+    table.cell(info, 0, 6, "SMT Bear",     text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 6, smt_bear_active ? "✓ " + smt_ticker : "—",
+               text_color=smt_bear_active ? color.red : color.gray, text_size=size.small)
+
+    table.cell(info, 0, 7, "Zone Bull",    text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 7,
+               price_in_bull_ifvg ? "✓ IFVG" : price_in_bull_fvg ? "✓ FVG" : "—",
+               text_color=price_in_bull_ifvg ? color.lime : price_in_bull_fvg ? color.teal : color.gray,
+               text_size=size.small)
+
+    table.cell(info, 0, 8, "Zone Bear",    text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 8,
+               price_in_bear_ifvg ? "✓ IFVG" : price_in_bear_fvg ? "✓ FVG" : "—",
+               text_color=price_in_bear_ifvg ? color.red : price_in_bear_fvg ? color.orange : color.gray,
+               text_size=size.small)
+
+    table.cell(info, 0, 9, "Liq H1 Hi",   text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 9, str.tostring(h1_wick_hi, format.mintick),
+               text_color=near_hi_liq ? color.yellow : color.gray, text_size=size.small)
+
+    table.cell(info, 0, 10, "Liq H1 Lo",  text_color=color.white,  text_size=size.small)
+    table.cell(info, 1, 10, str.tostring(h1_wick_lo, format.mintick),
+               text_color=near_lo_liq ? color.yellow : color.gray, text_size=size.small)
+
+// ============================================================================
+// ALERTES
+// ============================================================================
+alertcondition(buy_sig,             "HUSS ICT BUY",  "{{ticker}} BUY ★ SMT+IFVG | Entry {{close}} | TF {{interval}}")
+alertcondition(sell_sig,            "HUSS ICT SELL", "{{ticker}} SELL ★ SMT+IFVG | Entry {{close}} | TF {{interval}}")
+alertcondition(buy_sig or sell_sig, "HUSS ICT ANY",  "{{ticker}} SIGNAL | Entry {{close}} | TF {{interval}}")
