@@ -1,78 +1,81 @@
 // ============================================================================
-// NOWICK CONFLUENCE PRO — Brad.fx Multi-Pair
-// v1.0 — Nowick + Gap Fill + Rejection Zone confluence
-//
-// LOGIQUE :
-//   Un nowick seul = niveau potentiel.
-//   Un nowick + confluence (gap fill OU rejection zone) = signal de qualité.
-//   → C'est exactement les trades que tu prends sur le screenshot.
-//
-// DÉPLOIEMENT MULTI-PAIR :
-//   Coller cet indicateur sur : AUDUSD, EURUSD, GBPUSD, USDJPY, GBPJPY
-//   Créer une alerte TradingView "Nowick CONFLUENCE BUY/SELL" sur chaque chart.
-//   = 5x plus de setups sans baisser la qualité.
-//
-// FILTRES ACTIFS (dans l'ordre de sélection) :
-//   1. Nowick valide (corps >= 0.4 ATR, mèche <= 12% du corps)
-//   2. SMA200 alignment (trend de fond)
-//   3. Session Londres+NY (7h-17h UTC)
-//   4. Retest du niveau nowick (le niveau tient = momentum confirmé)
-//   5. CONFLUENCE : FVG fill OU Rejection zone OU les deux
+// NOWICK CONFLUENCE PRO v2 — Brad.fx Multi-Pair
+// Améliorations vs v1 :
+//   + Order Block (zone institutionnelle = dernier canal opposé avant impulse)
+//   + Pinbar / Big Bounce (signal direct sans retest)
+//   + EMA 21/50 comme zone de confluence
+//   + SL basé sur la structure (swing low/high) plutôt que simple ATR
+//   + Paramètres assouplis → plus de trades
+//   + Mémoire FVG et OB plus longue (lookback historique)
 // ============================================================================
 
 //@version=6
-indicator("Nowick Confluence PRO", overlay=true,
+indicator("Nowick Confluence PRO v2", overlay=true,
           max_bars_back=500, max_labels_count=500, max_lines_count=500,
-          max_boxes_count=200)
+          max_boxes_count=400)
 
 // ============================================================================
 // INPUTS
 // ============================================================================
 
-g1 = "── Nowick ──"
-wick_pct     = input.float(12.0, "Mèche max (% corps)",  minval=1, maxval=50, step=1, group=g1,
-               tooltip="12% = wick ≤ 12% du corps. Plus strict = moins de trades mais meilleure qualité.")
-min_body_atr = input.float(0.4,  "Corps min (× ATR)",    minval=0.1, maxval=2, step=0.1, group=g1)
-atr_len      = input.int(14,     "ATR length",            minval=5, group=g1)
+g1 = "── Signal ──"
+wick_pct     = input.float(20.0, "Mèche max nowick (% corps)",   minval=1,    maxval=100, step=1,    group=g1,
+               tooltip="20% = plus de nowicks détectés. Baisse pour plus de qualité, monte pour plus de quantité.")
+min_body_atr = input.float(0.25, "Corps min (× ATR)",             minval=0.05, maxval=2,   step=0.05, group=g1)
+atr_len      = input.int(14,     "ATR length",                    minval=5,                           group=g1)
+use_pinbar   = input.bool(true,  "Activer Pinbar (gros bounce)",  group=g1,
+               tooltip="Grande mèche de rejet = signal même sans nowick parfait. Capture les gros bounces.")
+pin_wick_pct = input.float(55.0, "Mèche min pinbar (% range)",   minval=20,   maxval=90,  step=5,    group=g1,
+               tooltip="55% = la mèche fait au moins 55% du range total (high-low) de la bougie.")
+
+g_direct = "── Bounce Direct ──"
+use_direct   = input.bool(true,  "Signal immédiat pinbar + zone", group=g_direct,
+               tooltip="OFF = attend le retest. ON = pinbar À un niveau = signal immédiat (gros bounces).")
 
 g2 = "── Retest ──"
-retest_bars  = input.int(15,   "Fenêtre retest (barres)", minval=1, maxval=50, group=g2)
-retest_tol   = input.float(0.3,"Tolérance sweep (× ATR)", minval=0, maxval=1,  step=0.05, group=g2)
-req_dir      = input.bool(true, "Bougie de retest dans le bon sens ★", group=g2,
-               tooltip="BUY = bougie verte sur le retest. SELL = bougie rouge. Filtre WR principal.")
+retest_bars  = input.int(25,   "Fenêtre retest (barres)",         minval=1, maxval=100,   group=g2)
+retest_tol   = input.float(0.5,"Tolérance sweep (× ATR)",         minval=0, maxval=2,     step=0.1, group=g2)
+req_dir      = input.bool(true, "Bougie de retest dans le bon sens", group=g2)
 
-gc = "── Mode Confluence ──"
-conf_and     = input.bool(false, "FVG ET Rejection (strict)", group=gc,
-               tooltip="OFF = FVG OU Rejection (recommandé, plus de signaux). ON = les deux obligatoires en même temps (très rare).")
+gc = "── Confluence ──"
+conf_and     = input.bool(false, "Toutes confluences obligatoires (strict)", group=gc,
+               tooltip="OFF = FVG OU OB OU EMA (recommandé). ON = tout simultanément (très rare).")
 
-g3 = "── Gap Fill (FVG) ──"
-use_fvg      = input.bool(true,  "Activer confluence Gap Fill", group=g3,
-               tooltip="Fair Value Gap : zone laissée entre 3 bougies consécutives. Le marché a tendance à revenir la combler.")
-fvg_bars     = input.int(50,     "Mémoire FVG (barres max)", minval=10, maxval=200, group=g3,
-               tooltip="FVG plus vieux que cette limite sont supprimés.")
-fvg_min_atr  = input.float(0.3,  "Taille min FVG (× ATR)",   minval=0.1, maxval=5, step=0.1, group=g3,
-               tooltip="0.3 ATR = ~6 pips AUDUSD M15. Baisse si trop peu de FVG.")
-show_fvg     = input.bool(true,  "Afficher boîtes FVG", group=g3)
+g3 = "── FVG ──"
+use_fvg      = input.bool(true,  "Activer FVG",                   group=g3)
+fvg_bars     = input.int(100,    "Mémoire FVG (barres)",          minval=10, maxval=500,  group=g3,
+               tooltip="FVG gardés 100 barres (lookback historique plus long que v1).")
+fvg_min_atr  = input.float(0.15, "Taille min FVG (× ATR)",       minval=0.05, maxval=5,  step=0.05, group=g3,
+               tooltip="0.15 = FVGs plus petits acceptés. Monte pour ne garder que les gros.")
+show_fvg     = input.bool(true,  "Afficher boîtes FVG",           group=g3)
 
-g4 = "── Rejection Zone ──"
-use_rej_zone = input.bool(true,  "Activer confluence Rejection Zone", group=g4,
-               tooltip="Zone où le prix a fait un gros mouvement impulsif. Le bas/haut de l'impulse = zone clé.")
-rej_impulse  = input.float(1.5,  "Impulse min pour créer zone (× ATR)", minval=0.5, maxval=10, step=0.1, group=g4,
-               tooltip="1.5× ATR = bougie impulsive. Baisse si trop peu de zones.")
-rej_zone_bars= input.int(100,    "Mémoire zones (barres max)", minval=20, maxval=500, group=g4)
-show_rej     = input.bool(true,  "Afficher Rejection Zones", group=g4)
+g_ob = "── Order Block ──"
+use_ob       = input.bool(true,  "Activer Order Block",            group=g_ob,
+               tooltip="OB = dernier canal opposé avant un mouvement impulsif. Zone institutionnelle clé.")
+ob_impulse   = input.float(1.8,  "Impulse OB (× ATR)",            minval=0.5, maxval=10,  step=0.1, group=g_ob)
+ob_bars      = input.int(150,    "Mémoire OB (barres)",           minval=20,  maxval=500,           group=g_ob)
+show_ob      = input.bool(true,  "Afficher Order Blocks",          group=g_ob)
+
+g_ema = "── EMA Bounce ──"
+use_ema_conf = input.bool(true,  "Activer confluence EMA bounce",  group=g_ema,
+               tooltip="Bougie qui touche l'EMA 21 ou 50 et rebondit = confluence.")
+ema1_len     = input.int(21,     "EMA 1",                         minval=5,                          group=g_ema)
+ema2_len     = input.int(50,     "EMA 2",                         minval=10,                         group=g_ema)
+ema_tol_atr  = input.float(0.3,  "Tolérance EMA (× ATR)",        minval=0.05, maxval=2, step=0.05,  group=g_ema)
 
 g5 = "── Trend ──"
-use_sma      = input.bool(true, "Filtre SMA 200", group=g5)
-sma_len      = input.int(200,   "SMA length", minval=20, group=g5)
+use_sma      = input.bool(true, "Filtre SMA 200",                  group=g5)
+sma_len      = input.int(200,   "SMA length",                      minval=20,                        group=g5)
 
 g6 = "── Session ──"
-use_sess     = input.bool(true, "Session UTC 7-17 (Londres+NY)", group=g6)
+use_sess     = input.bool(true, "Session UTC 7-17 (Londres+NY)",   group=g6)
 
 g7 = "── SL / TP ──"
-sl_buf       = input.float(0.5, "SL buffer (× ATR)", minval=0, maxval=3, step=0.1, group=g7)
-tp1_rr       = input.float(2.0, "TP1 RR",            minval=0.5, maxval=10, step=0.5, group=g7)
-tp2_rr       = input.float(3.0, "TP2 RR",            minval=0.5, maxval=15, step=0.5, group=g7)
+sl_lookback  = input.int(8,     "SL structure lookback (barres)",  minval=3,  maxval=30,             group=g7,
+               tooltip="SL placé sous le swing low des X dernières barres (structure) + buffer ATR.")
+sl_buf       = input.float(0.3, "SL buffer (× ATR)",               minval=0,  maxval=3,  step=0.1,  group=g7)
+tp1_rr       = input.float(2.0, "TP1 RR",                          minval=0.5, maxval=10, step=0.5, group=g7)
+tp2_rr       = input.float(3.5, "TP2 RR",                          minval=0.5, maxval=15, step=0.5, group=g7)
 
 // ============================================================================
 // CALCULS DE BASE
@@ -80,48 +83,50 @@ tp2_rr       = input.float(3.0, "TP2 RR",            minval=0.5, maxval=15, step
 
 atr    = ta.atr(atr_len)
 sma200 = ta.sma(close, sma_len)
+ema1   = ta.ema(close, ema1_len)
+ema2   = ta.ema(close, ema2_len)
 
 body    = math.abs(close - open)
 up_wick = high - math.max(open, close)
 dn_wick = math.min(open, close) - low
-thresh  = body * (wick_pct / 100.0)
+rng     = high - low
 big_bod = body >= atr * min_body_atr
 
-// ── NOWICK DETECTION ─────────────────────────────────────────────────────────
-// Bull nowick : bougie verte, quasi zéro mèche basse → le low est un niveau fort
-bull_nw_raw = close > open and dn_wick <= thresh and big_bod
-// Bear nowick : bougie rouge, quasi zéro mèche haute → le high est un niveau fort
-bear_nw_raw = close < open and up_wick <= thresh and big_bod
-
-// ── FILTRES SIMPLES ───────────────────────────────────────────────────────────
 sma_ok_bull = not use_sma or close > sma200
 sma_ok_bear = not use_sma or close < sma200
 sess_ok     = not use_sess or (hour(time, "UTC") >= 7 and hour(time, "UTC") < 17)
 
-valid_bull_nw = bull_nw_raw and sma_ok_bull
-valid_bear_nw = bear_nw_raw and sma_ok_bear
+// ── NOWICK ──────────────────────────────────────────────────────────────────
+thresh  = body * (wick_pct / 100.0)
+bull_nw = close > open and dn_wick <= thresh and big_bod
+bear_nw = close < open and up_wick <= thresh and big_bod
+
+// ── PINBAR (gros bounce) ─────────────────────────────────────────────────────
+// Bull pinbar = hammer : grande mèche basse, close dans la moitié haute du range
+bull_pin = use_pinbar and rng > atr * 0.3 and
+           dn_wick >= rng * (pin_wick_pct / 100.0) and
+           close >= low + rng * 0.35
+
+// Bear pinbar = shooting star : grande mèche haute, close dans la moitié basse
+bear_pin = use_pinbar and rng > atr * 0.3 and
+           up_wick >= rng * (pin_wick_pct / 100.0) and
+           close <= high - rng * 0.35
+
+valid_bull = (bull_nw or bull_pin) and sma_ok_bull
+valid_bear = (bear_nw or bear_pin) and sma_ok_bear
 
 // ============================================================================
-// GAP FILL / FAIR VALUE GAP (FVG)
+// FVG (Fair Value Gap)
 // ============================================================================
-// Pattern 3 bougies :
-//   Bullish FVG : high[2] < low[0]  → gap haussier entre bougie-2 et bougie-0
-//   Bearish FVG : low[2]  > high[0] → gap baissier entre bougie-2 et bougie-0
-// Ces zones agissent comme des aimants : le prix revient les combler.
-// Un nowick qui retest exactement dans un FVG = confluence forte.
 
-// Détection des FVG (bougie du milieu crée le gap)
-bull_fvg_top = high[2]  // haut du gap haussier
-bull_fvg_bot = low[0]   // bas du gap haussier
+bull_fvg_top = high[2]
+bull_fvg_bot = low[0]
 bull_fvg_ok  = low[0] > high[2] and (low[0] - high[2]) >= atr * fvg_min_atr
 
-bear_fvg_top = high[0]  // haut du gap baissier
-bear_fvg_bot = low[2]   // bas du gap baissier
+bear_fvg_top = high[0]
+bear_fvg_bot = low[2]
 bear_fvg_ok  = high[0] < low[2] and (low[2] - high[0]) >= atr * fvg_min_atr
 
-// Stockage des FVG actifs (on garde jusqu'à 10 FVG en mémoire)
-// Bull FVG = zone à remplir par le bas (prix descend jusqu'au FVG → BUY)
-// Bear FVG = zone à remplir par le haut (prix monte jusqu'au FVG → SELL)
 var float[] bfvg_top = array.new_float(0)
 var float[] bfvg_bot = array.new_float(0)
 var int[]   bfvg_age = array.new_int(0)
@@ -130,7 +135,6 @@ var float[] sfvg_top = array.new_float(0)
 var float[] sfvg_bot = array.new_float(0)
 var int[]   sfvg_age = array.new_int(0)
 
-// Ajout nouveau FVG
 if bull_fvg_ok
     array.unshift(bfvg_top, bull_fvg_top)
     array.unshift(bfvg_bot, bull_fvg_bot)
@@ -141,146 +145,177 @@ if bear_fvg_ok
     array.unshift(sfvg_bot, bear_fvg_bot)
     array.unshift(sfvg_age, bar_index)
 
-// Nettoyage FVG expirés ou déjà comblés
-i = 0
-while i < array.size(bfvg_age)
-    age = bar_index - array.get(bfvg_age, i)
-    bot = array.get(bfvg_bot, i)
-    // FVG comblé si le prix est descendu sous le bas du gap, ou trop vieux
-    if age > fvg_bars or low <= bot
-        array.remove(bfvg_top, i)
-        array.remove(bfvg_bot, i)
-        array.remove(bfvg_age, i)
+fi = 0
+while fi < array.size(bfvg_age)
+    if bar_index - array.get(bfvg_age, fi) > fvg_bars or low <= array.get(bfvg_bot, fi)
+        array.remove(bfvg_top, fi)
+        array.remove(bfvg_bot, fi)
+        array.remove(bfvg_age, fi)
     else
-        i += 1
+        fi += 1
 
-j = 0
-while j < array.size(sfvg_age)
-    age = bar_index - array.get(sfvg_age, j)
-    top = array.get(sfvg_top, j)
-    if age > fvg_bars or high >= top
-        array.remove(sfvg_top, j)
-        array.remove(sfvg_bot, j)
-        array.remove(sfvg_age, j)
+fj = 0
+while fj < array.size(sfvg_age)
+    if bar_index - array.get(sfvg_age, fj) > fvg_bars or high >= array.get(sfvg_top, fj)
+        array.remove(sfvg_top, fj)
+        array.remove(sfvg_bot, fj)
+        array.remove(sfvg_age, fj)
     else
-        j += 1
+        fj += 1
 
-// Test confluence : le prix actuel est dans un FVG
 price_in_bull_fvg = false
 price_in_bear_fvg = false
 
-if array.size(bfvg_top) > 0
+if use_fvg and array.size(bfvg_top) > 0
     for k = 0 to array.size(bfvg_top) - 1
         if low <= array.get(bfvg_top, k) and close >= array.get(bfvg_bot, k)
             price_in_bull_fvg := true
 
-if array.size(sfvg_top) > 0
+if use_fvg and array.size(sfvg_top) > 0
     for k = 0 to array.size(sfvg_top) - 1
         if high >= array.get(sfvg_bot, k) and close <= array.get(sfvg_top, k)
             price_in_bear_fvg := true
 
-// Affichage FVG (boîtes)
 if show_fvg and bull_fvg_ok
-    box.new(bar_index - 2, bull_fvg_bot, bar_index + 20, bull_fvg_top,
+    box.new(bar_index - 2, bull_fvg_bot, bar_index + 30, bull_fvg_top,
             border_color=color.new(color.teal, 60),
-            bgcolor=color.new(color.teal, 85),
-            border_width=1)
+            bgcolor=color.new(color.teal, 85), border_width=1)
 
 if show_fvg and bear_fvg_ok
-    box.new(bar_index - 2, bear_fvg_bot, bar_index + 20, bear_fvg_top,
+    box.new(bar_index - 2, bear_fvg_bot, bar_index + 30, bear_fvg_top,
             border_color=color.new(color.orange, 60),
-            bgcolor=color.new(color.orange, 85),
-            border_width=1)
+            bgcolor=color.new(color.orange, 85), border_width=1)
 
 // ============================================================================
-// REJECTION ZONE
+// ORDER BLOCK
 // ============================================================================
-// Une bougie impulsive (corps >= rej_impulse × ATR) crée une zone de rejet.
-// La zone = corps de la bougie impulsive.
-// Quand le prix revient tester cette zone = confluence forte.
-//
-// Exemples dans ton screenshot :
-//   - Les grandes bougies rouges créent des zones de résistance (base en haut)
-//   - Les grandes bougies vertes créent des zones de support (base en bas)
+// Bull OB = dernier canal baissier AVANT une impulse haussière forte
+//   → Quand le prix revient dans ce canal = zone d'achat institutionnelle
+// Bear OB = dernier canal haussier AVANT une impulse baissière forte
+//   → Quand le prix revient dans ce canal = zone de vente institutionnelle
 
-impulse_up   = close > open and body >= atr * rej_impulse  // grande bougie haussière
-impulse_down = close < open and body >= atr * rej_impulse  // grande bougie baissière
+big_bull_imp = close > open and body >= atr * ob_impulse
+big_bear_imp = close < open and body >= atr * ob_impulse
 
-// Stockage zones de rejet
-// Bull rejection = base d'une bougie impulsive haussière → zone de support
-// Bear rejection = base d'une bougie impulsive baissière → zone de résistance
-var float[] brej_top = array.new_float(0)
-var float[] brej_bot = array.new_float(0)
-var int[]   brej_age = array.new_int(0)
+var float[] bull_ob_top = array.new_float(0)
+var float[] bull_ob_bot = array.new_float(0)
+var int[]   bull_ob_age = array.new_int(0)
+var int[]   bull_ob_bar = array.new_int(0)  // bar_index du canal OB lui-même
 
-var float[] srej_top = array.new_float(0)
-var float[] srej_bot = array.new_float(0)
-var int[]   srej_age = array.new_int(0)
+var float[] bear_ob_top = array.new_float(0)
+var float[] bear_ob_bot = array.new_float(0)
+var int[]   bear_ob_age = array.new_int(0)
+var int[]   bear_ob_bar = array.new_int(0)
 
-if impulse_up
-    // Zone = bas du corps de la bougie haussière impulsive
-    array.unshift(brej_top, open + (body * 0.3))  // 30% du corps = zone
-    array.unshift(brej_bot, open)
-    array.unshift(brej_age, bar_index)
+bull_ob_new = false
+bear_ob_new = false
 
-if impulse_down
-    // Zone = haut du corps de la bougie baissière impulsive
-    array.unshift(srej_top, open)
-    array.unshift(srej_bot, open - (body * 0.3))
-    array.unshift(srej_age, bar_index)
+if big_bull_imp
+    for offset = 1 to 8
+        if close[offset] < open[offset]
+            ob_t = math.max(open[offset], close[offset])
+            ob_b = math.min(open[offset], close[offset])
+            array.unshift(bull_ob_top, ob_t)
+            array.unshift(bull_ob_bot, ob_b)
+            array.unshift(bull_ob_age, bar_index)
+            array.unshift(bull_ob_bar, bar_index - offset)
+            bull_ob_new := true
+            break
 
-// Nettoyage zones expirées
-ii = 0
-while ii < array.size(brej_age)
-    age = bar_index - array.get(brej_age, ii)
-    bot = array.get(brej_bot, ii)
-    if age > rej_zone_bars or close < bot - atr  // invalidée si cassée proprement
-        array.remove(brej_top, ii)
-        array.remove(brej_bot, ii)
-        array.remove(brej_age, ii)
+if big_bear_imp
+    for offset = 1 to 8
+        if close[offset] > open[offset]
+            ob_t = math.max(open[offset], close[offset])
+            ob_b = math.min(open[offset], close[offset])
+            array.unshift(bear_ob_top, ob_t)
+            array.unshift(bear_ob_bot, ob_b)
+            array.unshift(bear_ob_age, bar_index)
+            array.unshift(bear_ob_bar, bar_index - offset)
+            bear_ob_new := true
+            break
+
+oi = 0
+while oi < array.size(bull_ob_age)
+    if bar_index - array.get(bull_ob_age, oi) > ob_bars or low < array.get(bull_ob_bot, oi) - atr
+        array.remove(bull_ob_top, oi)
+        array.remove(bull_ob_bot, oi)
+        array.remove(bull_ob_age, oi)
+        array.remove(bull_ob_bar, oi)
     else
-        ii += 1
+        oi += 1
 
-jj = 0
-while jj < array.size(srej_age)
-    age = bar_index - array.get(srej_age, jj)
-    top = array.get(srej_top, jj)
-    if age > rej_zone_bars or close > top + atr
-        array.remove(srej_top, jj)
-        array.remove(srej_bot, jj)
-        array.remove(srej_age, jj)
+oj = 0
+while oj < array.size(bear_ob_age)
+    if bar_index - array.get(bear_ob_age, oj) > ob_bars or high > array.get(bear_ob_top, oj) + atr
+        array.remove(bear_ob_top, oj)
+        array.remove(bear_ob_bot, oj)
+        array.remove(bear_ob_age, oj)
+        array.remove(bear_ob_bar, oj)
     else
-        jj += 1
+        oj += 1
 
-// Test confluence : le prix est dans une rejection zone
-price_in_bull_rej = false
-price_in_bear_rej = false
+price_in_bull_ob = false
+price_in_bear_ob = false
 
-if array.size(brej_top) > 0
-    for k = 0 to array.size(brej_top) - 1
-        if (bar_index - array.get(brej_age, k)) >= 3 and low <= array.get(brej_top, k) and close >= array.get(brej_bot, k)
-            price_in_bull_rej := true
+if use_ob and array.size(bull_ob_top) > 0
+    for k = 0 to array.size(bull_ob_top) - 1
+        if (bar_index - array.get(bull_ob_age, k)) >= 2 and
+           low <= array.get(bull_ob_top, k) and close >= array.get(bull_ob_bot, k)
+            price_in_bull_ob := true
 
-if array.size(srej_top) > 0
-    for k = 0 to array.size(srej_top) - 1
-        if (bar_index - array.get(srej_age, k)) >= 3 and high >= array.get(srej_bot, k) and close <= array.get(srej_top, k)
-            price_in_bear_rej := true
+if use_ob and array.size(bear_ob_top) > 0
+    for k = 0 to array.size(bear_ob_top) - 1
+        if (bar_index - array.get(bear_ob_age, k)) >= 2 and
+           high >= array.get(bear_ob_bot, k) and close <= array.get(bear_ob_top, k)
+            price_in_bear_ob := true
 
-// Affichage Rejection Zones
-if show_rej and impulse_up
-    box.new(bar_index, open, bar_index + 30, open + (body * 0.3),
-            border_color=color.new(color.green, 50),
-            bgcolor=color.new(color.green, 88),
-            border_width=1)
+if show_ob and bull_ob_new and array.size(bull_ob_bar) > 0
+    box.new(array.get(bull_ob_bar, 0), array.get(bull_ob_bot, 0),
+            bar_index + 60, array.get(bull_ob_top, 0),
+            border_color=color.new(color.blue, 40),
+            bgcolor=color.new(color.blue, 88), border_width=1)
 
-if show_rej and impulse_down
-    box.new(bar_index, open - (body * 0.3), bar_index + 30, open,
-            border_color=color.new(color.red, 50),
-            bgcolor=color.new(color.red, 88),
-            border_width=1)
+if show_ob and bear_ob_new and array.size(bear_ob_bar) > 0
+    box.new(array.get(bear_ob_bar, 0), array.get(bear_ob_bot, 0),
+            bar_index + 60, array.get(bear_ob_top, 0),
+            border_color=color.new(color.purple, 40),
+            bgcolor=color.new(color.purple, 88), border_width=1)
 
 // ============================================================================
-// STOCKAGE NIVEAU NOWICK (retest logic)
+// EMA BOUNCE CONFLUENCE
+// ============================================================================
+// Bougie qui touche l'EMA et rebondit dans la bonne direction
+
+touch_bull_ema1 = low <= ema1 + atr * ema_tol_atr and close > ema1 and close > open
+touch_bull_ema2 = low <= ema2 + atr * ema_tol_atr and close > ema2 and close > open
+near_ema_bull   = use_ema_conf and (touch_bull_ema1 or touch_bull_ema2)
+
+touch_bear_ema1 = high >= ema1 - atr * ema_tol_atr and close < ema1 and close < open
+touch_bear_ema2 = high >= ema2 - atr * ema_tol_atr and close < ema2 and close < open
+near_ema_bear   = use_ema_conf and (touch_bear_ema1 or touch_bear_ema2)
+
+// ============================================================================
+// CONFLUENCE CHECK
+// ============================================================================
+
+bull_conf_fvg = price_in_bull_fvg
+bull_conf_ob  = price_in_bull_ob
+bull_conf_ema = near_ema_bull
+
+bear_conf_fvg = price_in_bear_fvg
+bear_conf_ob  = price_in_bear_ob
+bear_conf_ema = near_ema_bear
+
+bull_confluence = conf_and
+                  ? (bull_conf_fvg and bull_conf_ob and bull_conf_ema)
+                  : (bull_conf_fvg or bull_conf_ob or bull_conf_ema)
+
+bear_confluence = conf_and
+                  ? (bear_conf_fvg and bear_conf_ob and bear_conf_ema)
+                  : (bear_conf_fvg or bear_conf_ob or bear_conf_ema)
+
+// ============================================================================
+// STOCKAGE NIVEAU + RETEST
 // ============================================================================
 
 var float nw_buy_lo = na
@@ -288,17 +323,16 @@ var int   nw_buy_b  = na
 var float nw_sel_hi = na
 var int   nw_sel_b  = na
 
-if valid_bull_nw
+if valid_bull
     nw_buy_lo := low
     nw_buy_b  := bar_index
-if valid_bear_nw
+if valid_bear
     nw_sel_hi := high
     nw_sel_b  := bar_index
 
 age_buy  = na(nw_buy_b)  ? na : bar_index - nw_buy_b
 age_sell = na(nw_sel_b)  ? na : bar_index - nw_sel_b
 
-// Expiration
 if not na(age_buy)  and age_buy  > retest_bars
     nw_buy_lo := na
     nw_buy_b  := na
@@ -306,63 +340,61 @@ if not na(age_sell) and age_sell > retest_bars
     nw_sel_hi := na
     nw_sel_b  := na
 
-// Invalidation (close casse le niveau)
-if not na(nw_buy_lo) and close < nw_buy_lo - atr * 0.1
+if not na(nw_buy_lo) and close < nw_buy_lo - atr * 0.3
     nw_buy_lo := na
     nw_buy_b  := na
-if not na(nw_sel_hi) and close > nw_sel_hi + atr * 0.1
+if not na(nw_sel_hi) and close > nw_sel_hi + atr * 0.3
     nw_sel_hi := na
     nw_sel_b  := na
 
-// ============================================================================
-// RETEST DETECTION
-// ============================================================================
-
-tol = atr * retest_tol
-
+tol         = atr * retest_tol
 dir_ok_buy  = not req_dir or close > open
 dir_ok_sell = not req_dir or close < open
 
 retest_buy  = not na(nw_buy_lo) and age_buy  >= 1 and age_buy  <= retest_bars and
-              low  <= nw_buy_lo + tol and close >= nw_buy_lo and dir_ok_buy
+              low  <= nw_buy_lo + tol and close >= nw_buy_lo - tol * 0.5 and dir_ok_buy
 
 retest_sell = not na(nw_sel_hi) and age_sell >= 1 and age_sell <= retest_bars and
-              high >= nw_sel_hi - tol and close <= nw_sel_hi and dir_ok_sell
+              high >= nw_sel_hi - tol and close <= nw_sel_hi + tol * 0.5 and dir_ok_sell
 
 // ============================================================================
-// CONFLUENCE CHECK
+// SIGNAUX FINAUX
 // ============================================================================
-// conf_and = false (défaut) → FVG OU Rejection = signal  (recommandé)
-// conf_and = true           → FVG ET Rejection obligatoires (très strict)
+// Signal type A : retest du niveau nowick/pinbar + confluence
+// Signal type B : pinbar DIRECTEMENT à un niveau (gros bounce immédiat)
 
-bull_confluence = conf_and
-                  ? ((not use_fvg or price_in_bull_fvg) and (not use_rej_zone or price_in_bull_rej))
-                  : (price_in_bull_fvg or price_in_bull_rej)
+sig_buy_retest  = retest_buy  and bull_confluence and sess_ok
+sig_sell_retest = retest_sell and bear_confluence and sess_ok
 
-bear_confluence = conf_and
-                  ? ((not use_fvg or price_in_bear_fvg) and (not use_rej_zone or price_in_bear_rej))
-                  : (price_in_bear_fvg or price_in_bear_rej)
+sig_buy_direct  = use_direct and bull_pin and bull_confluence and sess_ok and sma_ok_bull
+sig_sell_direct = use_direct and bear_pin and bear_confluence and sess_ok and sma_ok_bear
 
-// ── SIGNAUX FINAUX ────────────────────────────────────────────────────────────
-buy_sig  = retest_buy  and bull_confluence and sess_ok
-sell_sig = retest_sell and bear_confluence and sess_ok
+buy_sig  = sig_buy_retest  or sig_buy_direct
+sell_sig = sig_sell_retest or sig_sell_direct
 
-// Consommer le niveau après signal
-if buy_sig
+// Consommer le niveau après signal retest
+if sig_buy_retest
     nw_buy_lo := na
     nw_buy_b  := na
-if sell_sig
+if sig_sell_retest
     nw_sel_hi := na
     nw_sel_b  := na
 
 // ============================================================================
-// SL / TP
+// SL / TP — Structure-based
 // ============================================================================
+// SL = swing low/high des sl_lookback dernières barres + buffer ATR
+// Plus robuste qu'un simple offset ATR : on place le SL sous la structure réelle
 
-buy_sl   = buy_sig  ? math.min(nw_buy_lo[1], low) - atr * sl_buf : na
-sell_sl  = sell_sig ? math.max(nw_sel_hi[1], high) + atr * sl_buf : na
+struct_sl_buy  = ta.lowest(low,  sl_lookback)
+struct_sl_sell = ta.highest(high, sl_lookback)
+
+buy_sl   = buy_sig  ? struct_sl_buy  - atr * sl_buf : na
+sell_sl  = sell_sig ? struct_sl_sell + atr * sl_buf : na
+
 buy_risk = not na(buy_sl)  ? close - buy_sl  : na
 sel_risk = not na(sell_sl) ? sell_sl - close : na
+
 buy_tp1  = not na(buy_risk) ? close + buy_risk * tp1_rr : na
 buy_tp2  = not na(buy_risk) ? close + buy_risk * tp2_rr : na
 sell_tp1 = not na(sel_risk) ? close - sel_risk * tp1_rr : na
@@ -373,110 +405,115 @@ sell_tp2 = not na(sel_risk) ? close - sel_risk * tp2_rr : na
 // ============================================================================
 
 if buy_sig
-    conf_str = (price_in_bull_fvg ? "FVG" : "") +
-               (price_in_bull_fvg and price_in_bull_rej ? " + " : "") +
-               (price_in_bull_rej ? "REJ" : "")
+    type_str  = sig_buy_direct and not sig_buy_retest ? " ★" : ""
+    conf_str  = (bull_conf_fvg ? "FVG " : "") + (bull_conf_ob ? "OB " : "") + (bull_conf_ema ? "EMA" : "")
     label.new(bar_index, low - atr * 0.8,
-              "▲ BUY [" + conf_str + "]\n" +
-              "Entry  " + str.tostring(close,    format.mintick) + "\n" +
-              "TP1    " + str.tostring(buy_tp1,  format.mintick) + "\n" +
-              "TP2    " + str.tostring(buy_tp2,  format.mintick) + "\n" +
-              "SL     " + str.tostring(buy_sl,   format.mintick),
-              yloc=yloc.price,
-              color=color.new(color.green, 0),
-              textcolor=color.white,
-              style=label.style_label_up,
-              size=size.normal)
+              "▲ BUY" + type_str + " [" + conf_str + "]\n" +
+              "Entry  " + str.tostring(close,   format.mintick) + "\n" +
+              "TP1    " + str.tostring(buy_tp1, format.mintick) + "\n" +
+              "TP2    " + str.tostring(buy_tp2, format.mintick) + "\n" +
+              "SL     " + str.tostring(buy_sl,  format.mintick),
+              yloc=yloc.price, color=color.new(color.green, 0),
+              textcolor=color.white, style=label.style_label_up, size=size.normal)
     line.new(bar_index, buy_tp1, bar_index + 40, buy_tp1, color=color.new(color.lime,  10), width=2, style=line.style_dashed)
     line.new(bar_index, buy_tp2, bar_index + 40, buy_tp2, color=color.new(color.teal,  10), width=1, style=line.style_dashed)
     line.new(bar_index, close,   bar_index + 40, close,   color=color.new(color.white, 40), width=1, style=line.style_dotted)
     line.new(bar_index, buy_sl,  bar_index + 40, buy_sl,  color=color.new(color.red,   10), width=2, style=line.style_dashed)
 
 if sell_sig
-    conf_str = (price_in_bear_fvg ? "FVG" : "") +
-               (price_in_bear_fvg and price_in_bear_rej ? " + " : "") +
-               (price_in_bear_rej ? "REJ" : "")
+    type_str  = sig_sell_direct and not sig_sell_retest ? " ★" : ""
+    conf_str  = (bear_conf_fvg ? "FVG " : "") + (bear_conf_ob ? "OB " : "") + (bear_conf_ema ? "EMA" : "")
     label.new(bar_index, high + atr * 0.8,
-              "▼ SELL [" + conf_str + "]\n" +
+              "▼ SELL" + type_str + " [" + conf_str + "]\n" +
               "Entry  " + str.tostring(close,    format.mintick) + "\n" +
               "TP1    " + str.tostring(sell_tp1, format.mintick) + "\n" +
               "TP2    " + str.tostring(sell_tp2, format.mintick) + "\n" +
               "SL     " + str.tostring(sell_sl,  format.mintick),
-              yloc=yloc.price,
-              color=color.new(color.red, 0),
-              textcolor=color.white,
-              style=label.style_label_down,
-              size=size.normal)
+              yloc=yloc.price, color=color.new(color.red, 0),
+              textcolor=color.white, style=label.style_label_down, size=size.normal)
     line.new(bar_index, sell_tp1, bar_index + 40, sell_tp1, color=color.new(color.lime,  10), width=2, style=line.style_dashed)
     line.new(bar_index, sell_tp2, bar_index + 40, sell_tp2, color=color.new(color.teal,  10), width=1, style=line.style_dashed)
     line.new(bar_index, close,    bar_index + 40, close,    color=color.new(color.white, 40), width=1, style=line.style_dotted)
     line.new(bar_index, sell_sl,  bar_index + 40, sell_sl,  color=color.new(color.red,   10), width=2, style=line.style_dashed)
 
 // ============================================================================
-// VISUELS BASE
+// VISUELS
 // ============================================================================
 
-// Nowicks détectés (petits triangles)
-plotshape(valid_bull_nw, "Bull NW", shape.triangleup,   location.belowbar, color.new(color.lime,  30), size=size.tiny)
-plotshape(valid_bear_nw, "Bear NW", shape.triangledown, location.abovebar, color.new(color.red,   30), size=size.tiny)
+// Nowicks (triangles verts/rouges) et Pinbars (cercles cyan/orange)
+plotshape(valid_bull and bull_nw,  "NW Bull",  shape.triangleup,   location.belowbar, color.new(color.lime,   20), size=size.tiny)
+plotshape(valid_bear and bear_nw,  "NW Bear",  shape.triangledown, location.abovebar, color.new(color.red,    20), size=size.tiny)
+plotshape(valid_bull and bull_pin and not bull_nw, "Pin Bull", shape.circle, location.belowbar, color.new(color.aqua,   30), size=size.tiny)
+plotshape(valid_bear and bear_pin and not bear_nw, "Pin Bear", shape.circle, location.abovebar, color.new(color.orange, 30), size=size.tiny)
 
-// SMA200
-plot(use_sma ? sma200 : na, "SMA 200", color.new(color.yellow, 30), 2)
+// EMAs et SMA
+plot(ema1,                  "EMA " + str.tostring(ema1_len), color.new(color.aqua,   50), 1)
+plot(ema2,                  "EMA " + str.tostring(ema2_len), color.new(color.purple, 50), 1)
+plot(use_sma ? sma200 : na, "SMA 200",                       color.new(color.yellow, 30), 2)
 
 // ============================================================================
 // TABLE INFO
 // ============================================================================
 
-var table info = table.new(position.top_right, 2, 9,
+var table info = table.new(position.top_right, 2, 10,
      bgcolor=color.new(color.black, 75),
      border_color=color.new(color.gray, 50), border_width=1)
 
 if barstate.islast
-    table.cell(info, 0, 0, "NW Confluence",   text_color=color.white,  text_size=size.small,
+    table.cell(info, 0, 0, "NW PRO v2",   text_color=color.white,  text_size=size.small,
                bgcolor=color.new(color.navy, 20), text_halign=text.align_center)
-    table.cell(info, 1, 0, syminfo.ticker,     text_color=color.yellow, text_size=size.small,
+    table.cell(info, 1, 0, syminfo.ticker, text_color=color.yellow, text_size=size.small,
                bgcolor=color.new(color.navy, 20), text_halign=text.align_center)
 
-    sess_color = sess_ok     ? color.lime : color.red
-    sma_color  = (close > sma200) ? color.lime : color.red
-    fvg_b_str  = str.tostring(array.size(bfvg_top)) + " bull / " + str.tostring(array.size(sfvg_top)) + " bear"
-    rej_b_str  = str.tostring(array.size(brej_top)) + " bull / " + str.tostring(array.size(srej_top)) + " bear"
-    nw_str     = not na(nw_buy_lo) ? "BUY " + str.tostring(age_buy) + "b" :
-                 not na(nw_sel_hi) ? "SELL " + str.tostring(age_sell) + "b" : "—"
+    table.cell(info, 0, 1, "Session",      text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 1, sess_ok ? "✓ Active" : "✗ Fermée",
+               text_color=sess_ok ? color.lime : color.red, text_size=size.small)
 
-    table.cell(info, 0, 1, "Session",    text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 1, sess_ok ? "✓ Active" : "✗ Fermée", text_color=sess_color, text_size=size.small)
+    table.cell(info, 0, 2, "SMA 200",      text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 2, close > sma200 ? "▲ BULL" : "▼ BEAR",
+               text_color=close > sma200 ? color.lime : color.red, text_size=size.small)
 
-    table.cell(info, 0, 2, "SMA 200",    text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 2, close > sma200 ? "▲ BULL" : "▼ BEAR", text_color=sma_color, text_size=size.small)
+    table.cell(info, 0, 3, "FVG actifs",   text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 3, str.tostring(array.size(bfvg_top)) + "↑ / " + str.tostring(array.size(sfvg_top)) + "↓",
+               text_color=color.teal, text_size=size.small)
 
-    table.cell(info, 0, 3, "FVG actifs", text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 3, fvg_b_str,   text_color=color.aqua,  text_size=size.small)
+    table.cell(info, 0, 4, "OB actifs",    text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 4, str.tostring(array.size(bull_ob_top)) + "↑ / " + str.tostring(array.size(bear_ob_top)) + "↓",
+               text_color=color.blue, text_size=size.small)
 
-    table.cell(info, 0, 4, "Rej Zones",  text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 4, rej_b_str,   text_color=color.aqua,  text_size=size.small)
-
-    table.cell(info, 0, 5, "NW pending", text_color=color.white, text_size=size.small)
+    table.cell(info, 0, 5, "NW pending",   text_color=color.white, text_size=size.small)
+    nw_str = not na(nw_buy_lo) ? "BUY " + str.tostring(age_buy) + "b" :
+             not na(nw_sel_hi) ? "SELL " + str.tostring(age_sell) + "b" : "—"
     table.cell(info, 1, 5, nw_str,
                text_color=not na(nw_buy_lo) ? color.lime : not na(nw_sel_hi) ? color.red : color.gray,
                text_size=size.small)
 
-    table.cell(info, 0, 6, "In Bull FVG", text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 6, price_in_bull_fvg ? "✓ OUI" : "—",
-               text_color=price_in_bull_fvg ? color.lime : color.gray, text_size=size.small)
+    table.cell(info, 0, 6, "In FVG",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 6,
+               price_in_bull_fvg ? "✓ BULL" : price_in_bear_fvg ? "✓ BEAR" : "—",
+               text_color=price_in_bull_fvg ? color.lime : price_in_bear_fvg ? color.orange : color.gray,
+               text_size=size.small)
 
-    table.cell(info, 0, 7, "In Bear FVG", text_color=color.white, text_size=size.small)
-    table.cell(info, 1, 7, price_in_bear_fvg ? "✓ OUI" : "—",
-               text_color=price_in_bear_fvg ? color.orange : color.gray, text_size=size.small)
+    table.cell(info, 0, 7, "In OB",        text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 7,
+               price_in_bull_ob ? "✓ BULL" : price_in_bear_ob ? "✓ BEAR" : "—",
+               text_color=price_in_bull_ob ? color.blue : price_in_bear_ob ? color.purple : color.gray,
+               text_size=size.small)
 
-    table.cell(info, 0, 8, "In Rej Zone", text_color=color.white, text_size=size.small)
-    rej_state = price_in_bull_rej ? "✓ BULL" : price_in_bear_rej ? "✓ BEAR" : "—"
-    rej_col   = price_in_bull_rej ? color.lime : price_in_bear_rej ? color.red : color.gray
-    table.cell(info, 1, 8, rej_state, text_color=rej_col, text_size=size.small)
+    table.cell(info, 0, 8, "EMA bounce",   text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 8,
+               near_ema_bull ? "✓ BULL" : near_ema_bear ? "✓ BEAR" : "—",
+               text_color=near_ema_bull ? color.aqua : near_ema_bear ? color.orange : color.gray,
+               text_size=size.small)
+
+    table.cell(info, 0, 9, "EMA21/50",     text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 9,
+               str.tostring(ema1, format.mintick) + " / " + str.tostring(ema2, format.mintick),
+               text_color=color.gray, text_size=size.small)
 
 // ============================================================================
-// ALERTCONDITIONS — Créer une alerte sur chaque paire dans TradingView
+// ALERTCONDITIONS
 // ============================================================================
-alertcondition(buy_sig,           "Nowick CONFLUENCE BUY",  "{{ticker}} — Nowick CONFLUENCE BUY | Entry: {{close}} | Confluence: FVG/REJ | TF: {{interval}}")
-alertcondition(sell_sig,          "Nowick CONFLUENCE SELL", "{{ticker}} — Nowick CONFLUENCE SELL | Entry: {{close}} | Confluence: FVG/REJ | TF: {{interval}}")
-alertcondition(buy_sig or sell_sig, "Nowick CONFLUENCE ANY","{{ticker}} — Nowick CONFLUENCE {{strategy.order.action}} | Entry: {{close}} | TF: {{interval}}")
+alertcondition(buy_sig,             "NW PRO v2 BUY",  "{{ticker}} BUY ★ | Entry {{close}} | TF {{interval}}")
+alertcondition(sell_sig,            "NW PRO v2 SELL", "{{ticker}} SELL ★ | Entry {{close}} | TF {{interval}}")
+alertcondition(buy_sig or sell_sig, "NW PRO v2 ANY",  "{{ticker}} SIGNAL | Entry {{close}} | TF {{interval}}")
