@@ -48,6 +48,8 @@ fvg_bars     = input.int(100,    "Mémoire FVG (barres)",          minval=10, ma
 fvg_min_atr  = input.float(0.15, "Taille min FVG (× ATR)",       minval=0.05, maxval=5,  step=0.05, group=g3,
                tooltip="0.15 = FVGs plus petits acceptés. Monte pour ne garder que les gros.")
 show_fvg     = input.bool(true,  "Afficher boîtes FVG",           group=g3)
+fvg_max_show = input.int(3,      "Max FVG affichés simultanément", minval=1, maxval=10,             group=g3,
+               tooltip="Limite le nombre de boîtes FVG visibles. 3 = seulement les 3 plus récents.")
 
 g_ob = "── Order Block ──"
 use_ob       = input.bool(true,  "Activer Order Block",            group=g_ob,
@@ -55,6 +57,8 @@ use_ob       = input.bool(true,  "Activer Order Block",            group=g_ob,
 ob_impulse   = input.float(1.8,  "Impulse OB (× ATR)",            minval=0.5, maxval=10,  step=0.1, group=g_ob)
 ob_bars      = input.int(150,    "Mémoire OB (barres)",           minval=20,  maxval=500,           group=g_ob)
 show_ob      = input.bool(true,  "Afficher Order Blocks",          group=g_ob)
+ob_max_show  = input.int(2,      "Max OB affichés simultanément",  minval=1, maxval=6,              group=g_ob,
+               tooltip="Limite le nombre de boîtes OB visibles. 2 = seulement les 2 plus récents.")
 
 g_ema = "── EMA Bounce ──"
 use_ema_conf = input.bool(true,  "Activer confluence EMA bounce",  group=g_ema,
@@ -176,12 +180,12 @@ if use_fvg and array.size(sfvg_top) > 0
         if high >= array.get(sfvg_bot, k) and close <= array.get(sfvg_top, k)
             price_in_bear_fvg := true
 
-if show_fvg and bull_fvg_ok
+if show_fvg and bull_fvg_ok and array.size(bfvg_top) <= fvg_max_show
     box.new(bar_index - 2, bull_fvg_bot, bar_index + 30, bull_fvg_top,
             border_color=color.new(color.teal, 60),
             bgcolor=color.new(color.teal, 85), border_width=1)
 
-if show_fvg and bear_fvg_ok
+if show_fvg and bear_fvg_ok and array.size(sfvg_top) <= fvg_max_show
     box.new(bar_index - 2, bear_fvg_bot, bar_index + 30, bear_fvg_top,
             border_color=color.new(color.orange, 60),
             bgcolor=color.new(color.orange, 85), border_width=1)
@@ -269,13 +273,13 @@ if use_ob and array.size(bear_ob_top) > 0
            high >= array.get(bear_ob_bot, k) and close <= array.get(bear_ob_top, k)
             price_in_bear_ob := true
 
-if show_ob and bull_ob_new and array.size(bull_ob_bar) > 0
+if show_ob and bull_ob_new and array.size(bull_ob_bar) > 0 and array.size(bull_ob_top) <= ob_max_show
     box.new(array.get(bull_ob_bar, 0), array.get(bull_ob_bot, 0),
             bar_index + 60, array.get(bull_ob_top, 0),
             border_color=color.new(color.blue, 40),
             bgcolor=color.new(color.blue, 88), border_width=1)
 
-if show_ob and bear_ob_new and array.size(bear_ob_bar) > 0
+if show_ob and bear_ob_new and array.size(bear_ob_bar) > 0 and array.size(bear_ob_top) <= ob_max_show
     box.new(array.get(bear_ob_bar, 0), array.get(bear_ob_bot, 0),
             bar_index + 60, array.get(bear_ob_top, 0),
             border_color=color.new(color.purple, 40),
