@@ -19,14 +19,14 @@ indicator("Nowick Confluence PRO v2", overlay=true,
 // ============================================================================
 
 g1 = "── Signal ──"
-wick_pct     = input.float(20.0, "Mèche max nowick (% corps)",   minval=1,    maxval=100, step=1,    group=g1,
-               tooltip="20% = plus de nowicks détectés. Baisse pour plus de qualité, monte pour plus de quantité.")
-min_body_atr = input.float(0.25, "Corps min (× ATR)",             minval=0.05, maxval=2,   step=0.05, group=g1)
+wick_pct     = input.float(15.0, "Mèche max nowick (% corps)",   minval=1,    maxval=100, step=1,    group=g1,
+               tooltip="15% = filtre plus strict. Monte pour plus de signaux.")
+min_body_atr = input.float(0.3,  "Corps min (× ATR)",             minval=0.05, maxval=2,   step=0.05, group=g1)
 atr_len      = input.int(14,     "ATR length",                    minval=5,                           group=g1)
 use_pinbar   = input.bool(true,  "Activer Pinbar (gros bounce)",  group=g1,
                tooltip="Grande mèche de rejet = signal même sans nowick parfait. Capture les gros bounces.")
-pin_wick_pct = input.float(55.0, "Mèche min pinbar (% range)",   minval=20,   maxval=90,  step=5,    group=g1,
-               tooltip="55% = la mèche fait au moins 55% du range total (high-low) de la bougie.")
+pin_wick_pct = input.float(65.0, "Mèche min pinbar (% range)",   minval=20,   maxval=90,  step=5,    group=g1,
+               tooltip="65% = mèche forte seulement. Baisse pour plus de signaux.")
 
 g_direct = "── Bounce Direct ──"
 use_direct   = input.bool(true,  "Signal immédiat pinbar + zone", group=g_direct,
@@ -34,19 +34,21 @@ use_direct   = input.bool(true,  "Signal immédiat pinbar + zone", group=g_direc
 
 g2 = "── Retest ──"
 retest_bars  = input.int(25,   "Fenêtre retest (barres)",         minval=1, maxval=100,   group=g2)
-retest_tol   = input.float(0.5,"Tolérance sweep (× ATR)",         minval=0, maxval=2,     step=0.1, group=g2)
+retest_tol   = input.float(0.3,"Tolérance sweep (× ATR)",         minval=0, maxval=2,     step=0.1, group=g2)
 req_dir      = input.bool(true, "Bougie de retest dans le bon sens", group=g2)
 
 gc = "── Confluence ──"
 conf_and     = input.bool(false, "Toutes confluences obligatoires (strict)", group=gc,
-               tooltip="OFF = FVG OU OB OU EMA (recommandé). ON = tout simultanément (très rare).")
+               tooltip="OFF = FVG OU OB (recommandé). ON = les deux obligatoires.")
+cooldown_bars = input.int(15, "Cooldown entre signaux (barres)", minval=3, maxval=50, group=gc,
+               tooltip="Évite les signaux en rafale. 15 barres min entre 2 BUY ou 2 SELL.")
 
 g3 = "── FVG ──"
 use_fvg      = input.bool(true,  "Activer FVG",                   group=g3)
 fvg_bars     = input.int(100,    "Mémoire FVG (barres)",          minval=10, maxval=500,  group=g3,
                tooltip="FVG gardés 100 barres (lookback historique plus long que v1).")
-fvg_min_atr  = input.float(0.15, "Taille min FVG (× ATR)",       minval=0.05, maxval=5,  step=0.05, group=g3,
-               tooltip="0.15 = FVGs plus petits acceptés. Monte pour ne garder que les gros.")
+fvg_min_atr  = input.float(0.25, "Taille min FVG (× ATR)",       minval=0.05, maxval=5,  step=0.05, group=g3,
+               tooltip="0.25 = FVGs significatifs seulement. Baisse pour plus de FVGs.")
 show_fvg     = input.bool(true,  "Afficher boîtes FVG",           group=g3)
 fvg_max_show = input.int(3,      "Max FVG affichés simultanément", minval=1, maxval=10,             group=g3,
                tooltip="Limite le nombre de boîtes FVG visibles. 3 = seulement les 3 plus récents.")
@@ -310,13 +312,14 @@ bear_conf_fvg = price_in_bear_fvg
 bear_conf_ob  = price_in_bear_ob
 bear_conf_ema = near_ema_bear
 
+// EMA seul N'est PAS suffisant — il faut FVG ou OB comme base
 bull_confluence = conf_and
-                  ? (bull_conf_fvg and bull_conf_ob and bull_conf_ema)
-                  : (bull_conf_fvg or bull_conf_ob or bull_conf_ema)
+                  ? (bull_conf_fvg and bull_conf_ob)
+                  : (bull_conf_fvg or bull_conf_ob)
 
 bear_confluence = conf_and
-                  ? (bear_conf_fvg and bear_conf_ob and bear_conf_ema)
-                  : (bear_conf_fvg or bear_conf_ob or bear_conf_ema)
+                  ? (bear_conf_fvg and bear_conf_ob)
+                  : (bear_conf_fvg or bear_conf_ob)
 
 // ============================================================================
 // STOCKAGE NIVEAU + RETEST
@@ -367,14 +370,25 @@ retest_sell = not na(nw_sel_hi) and age_sell >= 1 and age_sell <= retest_bars an
 // Signal type A : retest du niveau nowick/pinbar + confluence
 // Signal type B : pinbar DIRECTEMENT à un niveau (gros bounce immédiat)
 
-sig_buy_retest  = retest_buy  and bull_confluence and sess_ok
-sig_sell_retest = retest_sell and bear_confluence and sess_ok
+var int last_buy_bar  = -999
+var int last_sell_bar = -999
 
-sig_buy_direct  = use_direct and bull_pin and bull_confluence and sess_ok and sma_ok_bull
-sig_sell_direct = use_direct and bear_pin and bear_confluence and sess_ok and sma_ok_bear
+cd_buy  = bar_index - last_buy_bar  >= cooldown_bars
+cd_sell = bar_index - last_sell_bar >= cooldown_bars
+
+sig_buy_retest  = retest_buy  and bull_confluence and sess_ok and cd_buy
+sig_sell_retest = retest_sell and bear_confluence and sess_ok and cd_sell
+
+sig_buy_direct  = use_direct and bull_pin and bull_confluence and sess_ok and sma_ok_bull and cd_buy
+sig_sell_direct = use_direct and bear_pin and bear_confluence and sess_ok and sma_ok_bear and cd_sell
 
 buy_sig  = sig_buy_retest  or sig_buy_direct
 sell_sig = sig_sell_retest or sig_sell_direct
+
+if buy_sig
+    last_buy_bar  := bar_index
+if sell_sig
+    last_sell_bar := bar_index
 
 // Consommer le niveau après signal retest
 if sig_buy_retest
