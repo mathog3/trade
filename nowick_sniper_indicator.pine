@@ -1,0 +1,310 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// NOWICK SNIPER — Indicator v1.0  (Live Trading + Alerts)
+// ══════════════════════════════════════════════════════════════════════════════
+// Same detection logic as the Strategy file — use this on your LIVE chart.
+//
+// Alerts available (set in TradingView → Manage Alerts):
+//   1. 🕐 London Open   — It's 07:00 UTC, check for setups
+//   2. 🕐 NY Open       — It's 13:00 UTC, check for setups
+//   3. 📊 Bull Nowick   — New BUY zone formed (session-filtered)
+//   4. 📊 Bear Nowick   — New SELL zone formed (session-filtered)
+//   5. ⚡ Bull Swept    — BUY zone stop-hunted, watch for reclaim
+//   6. ⚡ Bear Swept    — SELL zone stop-hunted, watch for reclaim
+//   7. 🟢 BUY Signal    — Enter Long now (with SL/TP levels)
+//   8. 🔴 SELL Signal   — Enter Short now (with SL/TP levels)
+// ══════════════════════════════════════════════════════════════════════════════
+//@version=5
+indicator("Nowick Sniper v1.0", overlay=true, max_bars_back=500, max_lines_count=200, max_labels_count=200)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+var string G_NW = "🕯 Nowick Detection"
+var string G_SW = "💧 Liquidity Sweep"
+var string G_RM = "💰 Risk Management"
+var string G_TM = "⏱ Time & Sessions"
+var string G_FI = "🔍 Filters"
+var string G_VZ = "🎨 Visuals"
+
+wick_pct     = input.float(12.0, "Max Wick % of Body",        minval=1,   maxval=50,  step=1,   group=G_NW)
+min_body_atr = input.float(0.30, "Min Body Size (× ATR)",     minval=0.1, maxval=2.0, step=0.1, group=G_NW)
+atr_len      = input.int(14,     "ATR Period",                 minval=5,   maxval=50,            group=G_NW)
+nw_expiry    = input.int(15,     "Level Expiry (bars)",        minval=3,   maxval=50,            group=G_NW)
+
+sweep_tol    = input.float(0.20, "Sweep Tolerance (× ATR)",   minval=0.0, maxval=1.0, step=0.1, group=G_SW)
+
+sl_buf       = input.float(0.30, "SL Buffer (× ATR)",         minval=0.0, maxval=2.0, step=0.1, group=G_RM)
+tp1_rr       = input.float(2.0,  "TP1 Risk:Reward",           minval=1.0, maxval=10., step=0.5, group=G_RM)
+use_tp2      = input.bool(true,  "Show TP2",                                                     group=G_RM)
+tp2_rr       = input.float(3.0,  "TP2 Risk:Reward",           minval=1.0, maxval=15., step=0.5, group=G_RM)
+line_extend  = input.int(10,     "TP/SL Line Length (bars)",  minval=5,   maxval=50,            group=G_RM)
+
+use_sess     = input.bool(true,  "Session Filter",                                               group=G_TM)
+s1_start     = input.int(7,      "London Open — Start (UTC)", minval=0, maxval=23,              group=G_TM)
+s1_end       = input.int(10,     "London Open — End (UTC)",   minval=0, maxval=23,              group=G_TM)
+s2_start     = input.int(13,     "NY Open — Start (UTC)",     minval=0, maxval=23,              group=G_TM)
+s2_end       = input.int(16,     "NY Open — End (UTC)",       minval=0, maxval=23,              group=G_TM)
+
+use_sma      = input.bool(true,  "SMA200 Trend Filter",                                         group=G_FI)
+sma_len      = input.int(200,    "SMA Length",                minval=20, maxval=500,             group=G_FI)
+cooldown     = input.int(10,     "Cooldown (bars)",           minval=1,  maxval=100,             group=G_FI)
+
+show_zones   = input.bool(true,  "Show Active Nowick Zones",                                     group=G_VZ)
+show_sess_bg = input.bool(true,  "Highlight Session Background",                                 group=G_VZ)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+atr    = ta.atr(atr_len)
+sma200 = ta.sma(close, sma_len)
+body   = math.abs(close - open)
+h_wick = high  - math.max(close, open)
+l_wick = math.min(close, open) - low
+
+bull_nw = close > open
+       and body >= min_body_atr * atr
+       and l_wick <= (wick_pct / 100.0) * body
+
+bear_nw = close < open
+       and body >= min_body_atr * atr
+       and h_wick <= (wick_pct / 100.0) * body
+
+h_utc   = hour(time, "UTC")
+m_utc   = minute(time, "UTC")
+in_sess = not use_sess
+        or (h_utc >= s1_start and h_utc < s1_end)
+        or (h_utc >= s2_start and h_utc < s2_end)
+
+trend_up = not use_sma or close > sma200
+trend_dn = not use_sma or close < sma200
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════════════════════════════════════
+var float b_level  = na
+var int   b_age    = 0
+var bool  b_swept  = false
+var float b_swplow = na
+
+var float s_level  = na
+var int   s_age    = 0
+var bool  s_swept  = false
+var float s_swphig = na
+
+var int   last_sig = 0
+
+// ── Level aging ───────────────────────────────────────────────────────────────
+if bull_nw
+    b_level  := low
+    b_age    := 0
+    b_swept  := false
+    b_swplow := na
+else if not na(b_level)
+    b_age := b_age + 1
+    if b_age > nw_expiry
+        b_level  := na
+        b_swept  := false
+        b_swplow := na
+
+if bear_nw
+    s_level  := high
+    s_age    := 0
+    s_swept  := false
+    s_swphig := na
+else if not na(s_level)
+    s_age := s_age + 1
+    if s_age > nw_expiry
+        s_level  := na
+        s_swept  := false
+        s_swphig := na
+
+// ── Sweep Detection ───────────────────────────────────────────────────────────
+if not na(b_level) and b_age > 0
+    if low < b_level - sweep_tol * atr
+        b_swept  := true
+        b_swplow := na(b_swplow) ? low : math.min(b_swplow, low)
+
+if not na(s_level) and s_age > 0
+    if high > s_level + sweep_tol * atr
+        s_swept  := true
+        s_swphig := na(s_swphig) ? high : math.max(s_swphig, high)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS
+// ══════════════════════════════════════════════════════════════════════════════
+cd_ok = bar_index - last_sig > cooldown
+
+buy_sig  = not na(b_level) and b_swept
+        and close > b_level and close > open
+        and in_sess and trend_up and cd_ok
+
+sell_sig = not na(s_level) and s_swept
+        and close < s_level and close < open
+        and in_sess and trend_dn and cd_ok
+
+// Compute SL/TP for labels (only on signal bars)
+var float sig_entry = na
+var float sig_sl    = na
+var float sig_tp1   = na
+var float sig_tp2   = na
+var float sig_risk  = na
+
+if buy_sig
+    sig_entry := close
+    sig_sl    := (na(b_swplow) ? low : b_swplow) - sl_buf * atr
+    sig_risk  := sig_entry - sig_sl
+    sig_tp1   := sig_entry + sig_risk * tp1_rr
+    sig_tp2   := sig_entry + sig_risk * tp2_rr
+    last_sig  := bar_index
+    b_level   := na
+    b_swept   := false
+    b_swplow  := na
+
+if sell_sig
+    sig_entry := close
+    sig_sl    := (na(s_swphig) ? high : s_swphig) + sl_buf * atr
+    sig_risk  := sig_sl - sig_entry
+    sig_tp1   := sig_entry - sig_risk * tp1_rr
+    sig_tp2   := sig_entry - sig_risk * tp2_rr
+    last_sig  := bar_index
+    s_level   := na
+    s_swept   := false
+    s_swphig  := na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Session background
+bgcolor(show_sess_bg and in_sess ? color.new(color.blue, 93) : na, title="Session Window")
+
+// SMA200
+plot(use_sma ? sma200 : na, "SMA 200", color.new(color.orange, 50), linewidth=1)
+
+// ── Nowick zone lines (extend while active) ───────────────────────────────────
+var line bull_zone_line = na
+var line bear_zone_line = na
+
+if show_zones
+    if not na(b_level)
+        if na(bull_zone_line) or line.get_x1(bull_zone_line) < bar_index - nw_expiry - 5
+            bull_zone_line := line.new(bar_index, b_level, bar_index + 1, b_level,
+                                       color=color.new(color.lime, 50),
+                                       style=line.style_dashed, width=1)
+        else
+            line.set_x2(bull_zone_line, bar_index + 2)
+    else
+        if not na(bull_zone_line)
+            bull_zone_line := na
+
+    if not na(s_level)
+        if na(bear_zone_line) or line.get_x1(bear_zone_line) < bar_index - nw_expiry - 5
+            bear_zone_line := line.new(bar_index, s_level, bar_index + 1, s_level,
+                                       color=color.new(color.red, 50),
+                                       style=line.style_dashed, width=1)
+        else
+            line.set_x2(bear_zone_line, bar_index + 2)
+    else
+        if not na(bear_zone_line)
+            bear_zone_line := na
+
+// ── Nowick markers ────────────────────────────────────────────────────────────
+plotshape(bull_nw, "Bull Nowick", shape.triangleup,
+         location.belowbar, color.new(color.lime, 20), size=size.tiny)
+plotshape(bear_nw, "Bear Nowick", shape.triangledown,
+         location.abovebar, color.new(color.red, 20), size=size.tiny)
+
+// ── Sweep markers ─────────────────────────────────────────────────────────────
+bull_sweep_start = b_swept and not b_swept[1]
+bear_sweep_start = s_swept and not s_swept[1]
+plotshape(bull_sweep_start, "Bull Sweep", shape.xcross,
+         location.belowbar, color.new(color.yellow, 0), size=size.tiny)
+plotshape(bear_sweep_start, "Bear Sweep", shape.xcross,
+         location.abovebar, color.new(color.yellow, 0), size=size.tiny)
+
+// ── BUY Signal Label + Lines ──────────────────────────────────────────────────
+if buy_sig
+    risk_pips = sig_risk / syminfo.mintick * syminfo.pointvalue / syminfo.mintick
+
+    label.new(bar_index, low - atr * 0.5,
+              "▲ BUY\nEntry : " + str.tostring(sig_entry, format.mintick)
+              + "\nSL    : " + str.tostring(sig_sl,    format.mintick)
+              + "\nTP1   : " + str.tostring(sig_tp1,   format.mintick)
+              + (use_tp2 ? "\nTP2   : " + str.tostring(sig_tp2, format.mintick) : "")
+              + "\nRisk  : " + str.tostring(math.round(sig_risk / syminfo.mintick), "#") + " pts",
+              color      = color.new(color.green, 10),
+              textcolor  = color.white,
+              style      = label.style_label_up,
+              size       = size.normal)
+
+    line.new(bar_index, sig_sl,  bar_index + line_extend, sig_sl,
+             color=color.new(color.red,   20), style=line.style_dotted, width=2)
+    line.new(bar_index, sig_tp1, bar_index + line_extend, sig_tp1,
+             color=color.new(color.lime,  20), style=line.style_dotted, width=2)
+    if use_tp2
+        line.new(bar_index, sig_tp2, bar_index + line_extend, sig_tp2,
+                 color=color.new(color.teal, 20), style=line.style_dotted, width=1)
+
+// ── SELL Signal Label + Lines ─────────────────────────────────────────────────
+if sell_sig
+    label.new(bar_index, high + atr * 0.5,
+              "▼ SELL\nEntry : " + str.tostring(sig_entry, format.mintick)
+              + "\nSL    : " + str.tostring(sig_sl,    format.mintick)
+              + "\nTP1   : " + str.tostring(sig_tp1,   format.mintick)
+              + (use_tp2 ? "\nTP2   : " + str.tostring(sig_tp2, format.mintick) : "")
+              + "\nRisk  : " + str.tostring(math.round(sig_risk / syminfo.mintick), "#") + " pts",
+              color      = color.new(color.red, 10),
+              textcolor  = color.white,
+              style      = label.style_label_down,
+              size       = size.normal)
+
+    line.new(bar_index, sig_sl,  bar_index + line_extend, sig_sl,
+             color=color.new(color.red,   20), style=line.style_dotted, width=2)
+    line.new(bar_index, sig_tp1, bar_index + line_extend, sig_tp1,
+             color=color.new(color.lime,  20), style=line.style_dotted, width=2)
+    if use_tp2
+        line.new(bar_index, sig_tp2, bar_index + line_extend, sig_tp2,
+                 color=color.new(color.teal, 20), style=line.style_dotted, width=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERT CONDITIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Session open alerts (fires once per hour change into the session)
+london_open = h_utc == s1_start and m_utc == 0 and dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday
+ny_open     = h_utc == s2_start and m_utc == 0 and dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday
+
+alertcondition(london_open,
+               title   = "🕐 London Open",
+               message = "🇬🇧 London Open ({{interval}}) — Watch for Nowick setups on {{ticker}}")
+
+alertcondition(ny_open,
+               title   = "🕐 NY Open",
+               message = "🇺🇸 NY Open ({{interval}}) — Watch for Nowick setups on {{ticker}}")
+
+// Nowick formed during session (zone is set, wait for sweep)
+alertcondition(bull_nw and in_sess,
+               title   = "📊 Bull Nowick Formed",
+               message = "📊 {{ticker}} — Bull Nowick @ {{close}}. BUY zone set at {{low}}. Wait for sweep + reclaim.")
+
+alertcondition(bear_nw and in_sess,
+               title   = "📊 Bear Nowick Formed",
+               message = "📊 {{ticker}} — Bear Nowick @ {{close}}. SELL zone set at {{high}}. Wait for sweep + reclaim.")
+
+// Sweep detected (setup is forming — watch closely)
+alertcondition(bull_sweep_start and in_sess,
+               title   = "⚡ BUY Zone Swept",
+               message = "⚡ {{ticker}} — BUY zone swept below. Watch for reclaim candle ABOVE the nowick low. Setup forming.")
+
+alertcondition(bear_sweep_start and in_sess,
+               title   = "⚡ SELL Zone Swept",
+               message = "⚡ {{ticker}} — SELL zone swept above. Watch for reclaim candle BELOW the nowick high. Setup forming.")
+
+// Entry signals
+alertcondition(buy_sig,
+               title   = "🟢 BUY Signal — Nowick Sniper",
+               message = "🟢 BUY {{ticker}} @ {{close}} | SL below sweep low | TP1 at 2R | Session: {{time}}")
+
+alertcondition(sell_sig,
+               title   = "🔴 SELL Signal — Nowick Sniper",
+               message = "🔴 SELL {{ticker}} @ {{close}} | SL above sweep high | TP1 at 2R | Session: {{time}}")

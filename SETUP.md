@@ -10,6 +10,85 @@
 |---|---|
 | `nowick_strategy_pro.pine` | Strategy Tester TradingView (backtest + optimisation) |
 | `nowick_indicator_pro.pine` | Indicator sur chart live (trading réel) |
+| `nowick_signals.pine` | Indicator visuel pour backtest manuel (replay mode) |
+| `nowick_sniper_strategy.pine` | **NOUVEAU** — Nowick Sniper v1.0 (backtest, voir ci-dessous) |
+| `nowick_sniper_indicator.pine` | **NOUVEAU** — Nowick Sniper v1.0 live + alertes complètes |
+
+---
+
+## 🎯 NOWICK SNIPER v1.0 — Stratégie Double Break
+
+### Concept
+
+Le **Nowick Sniper** raffine la stratégie de base en ajoutant la confirmation par **liquidity sweep** (chasse aux stops) avant l'entrée. C'est le pattern "double break" :
+
+1. **1er break** — Le marché casse le niveau Nowick (stop hunt, fausse cassure)
+2. **2e break** — Le marché reprend le niveau (reclaim) → **ENTRÉE**
+
+```
+BUY SETUP :
+  Nowick Bull détecté        → zone marquée au LOW
+  Prix brise SOUS le low     → 1er break (chasse les stops longs)
+  Bougie ferme AU-DESSUS     → 2e break = RECLAIM = SIGNAL ▲
+
+  Entry : close du reclaim
+  SL    : sous le plus bas du sweep - buffer ATR
+  TP1   : Entry + Risk × 2.0 (50% position)
+  TP2   : Entry + Risk × 3.0 (50% restants, SL → BE après TP1)
+
+SELL SETUP : miroir exact
+```
+
+### Pourquoi c'est plus efficace que le simple retest
+
+| Critère | Retest simple | Nowick Sniper (Double Break) |
+|---|---|---|
+| Stop-Loss | Sous le nowick low | Sous le bas du sweep (plus serré) |
+| RR naturel | 1:2 standard | 1:2.5+ (SL plus tight = risk plus petit) |
+| Confirmation | Bougie de retest directionnelle | Sweep + reclaim = 2 confirmations |
+| Probabilité | ~55% WR | Cible 60-65% WR |
+| Logique de marché | Attendre que le marché revienne | Entrer APRÈS la fausse cassure = haute prob. |
+
+### Paramètres recommandés (M15 AUDUSD / EURUSD)
+
+| Paramètre | Valeur | Explication |
+|---|---|---|
+| `wick_pct` | 12% | Nowick strict |
+| `min_body_atr` | 0.3 | Corps significatif |
+| `sweep_tol` | 0.2 ATR | Tolérance sweep (0 = exact, 0.2 = petit dépassement OK) |
+| `sl_buf` | 0.3 ATR | Buffer sous/dessus le sweep extrême |
+| `tp1_rr` | 2.0 | TP1 à 2R (50% de la position) |
+| `tp2_rr` | 3.0 | TP2 à 3R (50% restants, SL → BE) |
+| `max_bars_in` | 2 | Sortie auto après 30 min si pas de résolution |
+
+### Sessions de trading
+
+Le Nowick Sniper est optimisé pour les **ouvertures de sessions** — c'est là que les sweeps sont le plus propres :
+
+| Session | Heures UTC | Paires recommandées |
+|---|---|---|
+| **London Open** | 07:00 — 10:00 | EURUSD, GBPUSD, AUDUSD |
+| **NY Open** | 13:00 — 16:00 | EURUSD, GBPUSD, USDCAD |
+
+### Alertes disponibles (nowick_sniper_indicator.pine)
+
+| Alerte | Moment | Action |
+|---|---|---|
+| `🕐 London Open` | 07:00 UTC | Regarder le chart |
+| `🕐 NY Open` | 13:00 UTC | Regarder le chart |
+| `📊 Bull/Bear Nowick` | Nowick formé en session | Zone activée, attendre sweep |
+| `⚡ BUY/SELL Zone Swept` | Sweep détecté | Setup en formation, focus |
+| `🟢 BUY Signal` | Reclaim bullish | **ENTRER** selon les niveaux du label |
+| `🔴 SELL Signal` | Reclaim bearish | **ENTRER** selon les niveaux du label |
+
+### Critères de validation backtest
+
+- Win Rate ≥ 60%
+- Profit Factor ≥ 1.8
+- Max Drawdown ≤ 12%
+- Minimum 50 trades (significativité statistique)
+
+---
 
 ---
 

@@ -1,0 +1,336 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// NOWICK SNIPER — Strategy v1.0
+// ══════════════════════════════════════════════════════════════════════════════
+// Pattern : Nowick candle sets a key level → Liquidity sweep (price breaks
+//           the level, hunts stops) → Price reclaims the level = ENTRY
+//           This is the "double break" : 1st break = stop hunt, 2nd break = signal
+//
+// Timeframe : M15 (recommended)
+// Sessions  : London Open 07-10 UTC / NY Open 13-16 UTC
+// RR        : 1:2 minimum (TP1), 1:3 (TP2 split)
+// Time Exit : Auto-close after 2 bars (30 min) if no resolution
+// ══════════════════════════════════════════════════════════════════════════════
+//@version=5
+strategy("Nowick Sniper v1.0",
+         overlay            = true,
+         initial_capital    = 10000,
+         default_qty_type   = strategy.percent_of_equity,
+         default_qty_value  = 100,
+         commission_type    = strategy.commission.percent,
+         commission_value   = 0.3,
+         slippage           = 1,
+         calc_on_every_tick = false,
+         max_bars_back      = 500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+var string G_NW = "🕯 Nowick Detection"
+var string G_SW = "💧 Liquidity Sweep"
+var string G_RM = "💰 Risk Management"
+var string G_TM = "⏱ Time Settings"
+var string G_FI = "🔍 Filters"
+
+// ── Nowick ────────────────────────────────────────────────────────────────────
+wick_pct     = input.float(12.0, "Max Wick % of Body",        minval=1,   maxval=50,  step=1,   group=G_NW)
+min_body_atr = input.float(0.30, "Min Body Size (× ATR)",     minval=0.1, maxval=2.0, step=0.1, group=G_NW)
+atr_len      = input.int(14,     "ATR Period",                 minval=5,   maxval=50,            group=G_NW)
+nw_expiry    = input.int(15,     "Level Expiry (bars)",        minval=3,   maxval=50,            group=G_NW)
+
+// ── Sweep ─────────────────────────────────────────────────────────────────────
+sweep_tol    = input.float(0.20, "Sweep Tolerance (× ATR)",   minval=0.0, maxval=1.0, step=0.1, group=G_SW)
+
+// ── Risk Management ───────────────────────────────────────────────────────────
+sl_buf       = input.float(0.30, "SL Buffer (× ATR)",         minval=0.0, maxval=2.0, step=0.1, group=G_RM)
+tp1_rr       = input.float(2.0,  "TP1 Risk:Reward",           minval=1.0, maxval=10., step=0.5, group=G_RM)
+use_tp2      = input.bool(true,  "Split TP — 50% TP1 / 50% TP2",                               group=G_RM)
+tp2_rr       = input.float(3.0,  "TP2 Risk:Reward",           minval=1.0, maxval=15., step=0.5, group=G_RM)
+move_be      = input.bool(true,  "Move SL to Breakeven after TP1",                              group=G_RM)
+
+// ── Time ──────────────────────────────────────────────────────────────────────
+use_time_exit = input.bool(true, "Auto-Close After N Bars",                                     group=G_TM)
+max_bars_in   = input.int(2,     "Max Bars in Trade (2 = 30 min on M15)", minval=1, maxval=30,  group=G_TM)
+use_sess      = input.bool(true, "Session Filter",                                               group=G_TM)
+s1_start      = input.int(7,     "London Open — Start (UTC)", minval=0, maxval=23,              group=G_TM)
+s1_end        = input.int(10,    "London Open — End (UTC)",   minval=0, maxval=23,              group=G_TM)
+s2_start      = input.int(13,    "NY Open — Start (UTC)",     minval=0, maxval=23,              group=G_TM)
+s2_end        = input.int(16,    "NY Open — End (UTC)",       minval=0, maxval=23,              group=G_TM)
+
+// ── Filters ───────────────────────────────────────────────────────────────────
+use_sma      = input.bool(true,  "SMA200 Trend Filter",                                         group=G_FI)
+sma_len      = input.int(200,    "SMA Length",                minval=20, maxval=500,             group=G_FI)
+cooldown     = input.int(10,     "Cooldown (bars between trades)", minval=1, maxval=100,         group=G_FI)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+atr    = ta.atr(atr_len)
+sma200 = ta.sma(close, sma_len)
+body   = math.abs(close - open)
+h_wick = high  - math.max(close, open)
+l_wick = math.min(close, open) - low
+
+// Nowick Detection
+bull_nw = close > open
+       and body >= min_body_atr * atr
+       and l_wick <= (wick_pct / 100.0) * body
+
+bear_nw = close < open
+       and body >= min_body_atr * atr
+       and h_wick <= (wick_pct / 100.0) * body
+
+// Session (UTC)
+h_utc    = hour(time, "UTC")
+in_sess  = not use_sess
+         or (h_utc >= s1_start and h_utc < s1_end)
+         or (h_utc >= s2_start and h_utc < s2_end)
+
+// Trend
+trend_up = not use_sma or close > sma200
+trend_dn = not use_sma or close < sma200
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STATE — NOWICK LEVELS
+// ══════════════════════════════════════════════════════════════════════════════
+var float b_level  = na      // Bull nowick low  (zone to defend)
+var int   b_age    = 0       // Bars since nowick formed
+var bool  b_swept  = false   // Has price swept below the level?
+var float b_swplow = na      // Lowest point reached during sweep
+
+var float s_level  = na      // Bear nowick high (zone to defend)
+var int   s_age    = 0
+var bool  s_swept  = false
+var float s_swphig = na      // Highest point reached during sweep
+
+// ── Level creation / aging / expiry ──────────────────────────────────────────
+if bull_nw
+    b_level  := low
+    b_age    := 0
+    b_swept  := false
+    b_swplow := na
+else if not na(b_level)
+    b_age := b_age + 1
+    if b_age > nw_expiry
+        b_level  := na
+        b_swept  := false
+        b_swplow := na
+
+if bear_nw
+    s_level  := high
+    s_age    := 0
+    s_swept  := false
+    s_swphig := na
+else if not na(s_level)
+    s_age := s_age + 1
+    if s_age > nw_expiry
+        s_level  := na
+        s_swept  := false
+        s_swphig := na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SWEEP DETECTION
+// Price must go THROUGH the level (stop hunt) before we consider entry
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Bull sweep : price dips BELOW the nowick low  (hunts buy-stop stops)
+if not na(b_level) and b_age > 0
+    if low < b_level - sweep_tol * atr
+        b_swept  := true
+        b_swplow := na(b_swplow) ? low : math.min(b_swplow, low)
+
+// Bear sweep : price spikes ABOVE the nowick high (hunts sell-stop stops)
+if not na(s_level) and s_age > 0
+    if high > s_level + sweep_tol * atr
+        s_swept  := true
+        s_swphig := na(s_swphig) ? high : math.max(s_swphig, high)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS — Reclaim after Sweep
+// ══════════════════════════════════════════════════════════════════════════════
+var int last_sig  = 0
+no_pos   = strategy.position_size == 0
+cd_ok    = bar_index - last_sig > cooldown
+
+// BUY : Level was swept below → candle closes BACK ABOVE + bullish body
+buy_sig  = not na(b_level)
+        and b_swept
+        and close > b_level           // reclaim : close above nowick low
+        and close > open              // bullish candle (buyers in control)
+        and in_sess
+        and trend_up
+        and cd_ok
+        and no_pos
+
+// SELL : Level was swept above → candle closes BACK BELOW + bearish body
+sell_sig = not na(s_level)
+        and s_swept
+        and close < s_level           // reclaim : close below nowick high
+        and close < open              // bearish candle (sellers in control)
+        and in_sess
+        and trend_dn
+        and cd_ok
+        and no_pos
+
+// ══════════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT STATE
+// ══════════════════════════════════════════════════════════════════════════════
+var float entry_px = na
+var float sl_px    = na
+var float tp1_px   = na
+var float tp2_px   = na
+var bool  tp1_done = false
+var string pos_dir = ""
+var int   entry_bar = 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+if buy_sig
+    // SL goes below the LOWEST point of the sweep (tightest logical stop)
+    sl_val   = (na(b_swplow) ? low : b_swplow) - sl_buf * atr
+    risk_val = close - sl_val
+    tp1_val  = close + risk_val * tp1_rr
+    tp2_val  = close + risk_val * tp2_rr
+
+    entry_px := close
+    sl_px    := sl_val
+    tp1_px   := tp1_val
+    tp2_px   := tp2_val
+    tp1_done := false
+    pos_dir  := "BUY"
+    entry_bar := bar_index
+
+    strategy.entry("BUY", strategy.long)
+    if use_tp2
+        strategy.exit("BUY_TP1", "BUY", qty_percent=50, limit=tp1_val, stop=sl_val, comment="TP1 2R")
+        strategy.exit("BUY_TP2", "BUY",                 limit=tp2_val, stop=sl_val, comment="TP2 3R")
+    else
+        strategy.exit("BUY_EXIT", "BUY", limit=tp1_val, stop=sl_val, comment="TP1 2R")
+
+    last_sig := bar_index
+    b_level  := na
+    b_swept  := false
+    b_swplow := na
+
+if sell_sig
+    sl_val   = (na(s_swphig) ? high : s_swphig) + sl_buf * atr
+    risk_val = sl_val - close
+    tp1_val  = close - risk_val * tp1_rr
+    tp2_val  = close - risk_val * tp2_rr
+
+    entry_px := close
+    sl_px    := sl_val
+    tp1_px   := tp1_val
+    tp2_px   := tp2_val
+    tp1_done := false
+    pos_dir  := "SELL"
+    entry_bar := bar_index
+
+    strategy.entry("SELL", strategy.short)
+    if use_tp2
+        strategy.exit("SELL_TP1", "SELL", qty_percent=50, limit=tp1_val, stop=sl_val, comment="TP1 2R")
+        strategy.exit("SELL_TP2", "SELL",                 limit=tp2_val, stop=sl_val, comment="TP2 3R")
+    else
+        strategy.exit("SELL_EXIT", "SELL", limit=tp1_val, stop=sl_val, comment="TP1 2R")
+
+    last_sig := bar_index
+    s_level  := na
+    s_swept  := false
+    s_swphig := na
+
+// ── Move SL to Breakeven after TP1 hit ───────────────────────────────────────
+if move_be and use_tp2 and strategy.position_size != 0 and not tp1_done
+    if pos_dir == "BUY" and high >= tp1_px
+        tp1_done := true
+        strategy.cancel("BUY_TP2")
+        strategy.exit("BUY_BE", "BUY", limit=tp2_px, stop=entry_px, comment="TP2 BE")
+    if pos_dir == "SELL" and low <= tp1_px
+        tp1_done := true
+        strategy.cancel("SELL_TP2")
+        strategy.exit("SELL_BE", "SELL", limit=tp2_px, stop=entry_px, comment="TP2 BE")
+
+// ── Time-Based Exit ───────────────────────────────────────────────────────────
+if use_time_exit and strategy.position_size != 0
+    if bar_index - entry_bar >= max_bars_in
+        strategy.close_all(comment="⏱ Time Exit")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Session background
+bgcolor(in_sess ? color.new(color.blue, 95) : na, title="Session Window")
+
+// SMA200
+plot(use_sma ? sma200 : na, "SMA 200", color.new(color.orange, 50), linewidth=1)
+
+// Nowick markers
+plotshape(bull_nw, "Bull Nowick", shape.triangleup,
+         location.belowbar, color.new(color.lime, 20), size=size.tiny)
+plotshape(bear_nw, "Bear Nowick", shape.triangledown,
+         location.abovebar, color.new(color.red, 20), size=size.tiny)
+
+// Sweep markers (first bar of sweep)
+bull_sweep_start = b_swept and not b_swept[1]
+bear_sweep_start = s_swept and not s_swept[1]
+plotshape(bull_sweep_start, "Bull Swept", shape.xcross,
+         location.belowbar, color.new(color.yellow, 0), size=size.tiny, title="Sweep Below")
+plotshape(bear_sweep_start, "Bear Swept", shape.xcross,
+         location.abovebar, color.new(color.yellow, 0), size=size.tiny, title="Sweep Above")
+
+// Entry signals
+plotshape(buy_sig,  "BUY Signal",  shape.labelup,
+         location.belowbar, color.new(color.green, 0),
+         text="▲ BUY", textcolor=color.white, size=size.small)
+plotshape(sell_sig, "SELL Signal", shape.labeldown,
+         location.abovebar, color.new(color.red, 0),
+         text="▼ SELL", textcolor=color.white, size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STATS TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+var table tbl = table.new(position.top_right, 2, 8,
+                          bgcolor    = color.new(color.black, 75),
+                          border_color = color.new(color.gray, 60),
+                          border_width = 1)
+
+if barstate.islastconfirmedhistory
+    wr     = strategy.wintrades / math.max(strategy.closedtrades, 1) * 100
+    pf     = strategy.grossprofit / math.max(strategy.grossloss, 0.01)
+    avg_rr = strategy.avg_trade  / math.max(math.abs(strategy.avg_losing_trade), 0.01)
+
+    c_ok  = color.new(color.lime, 0)
+    c_bad = color.new(color.red,  0)
+    c_hdr = color.new(color.gray, 30)
+    c_ttl = color.new(color.white, 0)
+    hdr_bg = color.new(color.navy, 40)
+
+    table.cell(tbl, 0, 0, "NOWICK SNIPER v1.0", text_color=c_ttl, text_size=size.small, bgcolor=hdr_bg)
+    table.cell(tbl, 1, 0, "M15 Results",         text_color=c_ttl, text_size=size.small, bgcolor=hdr_bg)
+
+    table.cell(tbl, 0, 1, "Win Rate",     text_color=c_hdr, text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(wr, "#.1") + "%",
+               text_color = wr >= 55 ? c_ok : c_bad, text_size=size.small)
+
+    table.cell(tbl, 0, 2, "Profit Factor", text_color=c_hdr, text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(pf, "#.##"),
+               text_color = pf >= 1.5 ? c_ok : c_bad, text_size=size.small)
+
+    table.cell(tbl, 0, 3, "Net P&L",      text_color=c_hdr, text_size=size.small)
+    table.cell(tbl, 1, 3, "$" + str.tostring(strategy.netprofit, "#"),
+               text_color = strategy.netprofit >= 0 ? c_ok : c_bad, text_size=size.small)
+
+    table.cell(tbl, 0, 4, "Trades",       text_color=c_hdr, text_size=size.small)
+    table.cell(tbl, 1, 4, str.tostring(strategy.closedtrades), text_color=c_ttl, text_size=size.small)
+
+    table.cell(tbl, 0, 5, "Max Drawdown", text_color=c_hdr, text_size=size.small)
+    table.cell(tbl, 1, 5, str.tostring(strategy.max_drawdown_percent, "#.1") + "%",
+               text_color=c_ttl, text_size=size.small)
+
+    table.cell(tbl, 0, 6, "Avg RR",       text_color=c_hdr, text_size=size.small)
+    table.cell(tbl, 1, 6, str.tostring(avg_rr, "#.##"),       text_color=c_ttl, text_size=size.small)
+
+    table.cell(tbl, 0, 7, "Avg Win / Loss", text_color=c_hdr, text_size=size.small)
+    table.cell(tbl, 1, 7, str.tostring(strategy.avg_winning_trade, "#.##")
+                        + " / " + str.tostring(math.abs(strategy.avg_losing_trade), "#.##"),
+               text_color=c_ttl, text_size=size.small)
