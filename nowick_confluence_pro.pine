@@ -41,20 +41,24 @@ retest_tol   = input.float(0.3,"Tolérance sweep (× ATR)", minval=0, maxval=1, 
 req_dir      = input.bool(true, "Bougie de retest dans le bon sens ★", group=g2,
                tooltip="BUY = bougie verte sur le retest. SELL = bougie rouge. Filtre WR principal.")
 
+gc = "── Mode Confluence ──"
+conf_and     = input.bool(false, "FVG ET Rejection (strict)", group=gc,
+               tooltip="OFF = FVG OU Rejection (recommandé, plus de signaux). ON = les deux obligatoires en même temps (très rare).")
+
 g3 = "── Gap Fill (FVG) ──"
 use_fvg      = input.bool(true,  "Activer confluence Gap Fill", group=g3,
                tooltip="Fair Value Gap : zone laissée entre 3 bougies consécutives. Le marché a tendance à revenir la combler.")
 fvg_bars     = input.int(50,     "Mémoire FVG (barres max)", minval=10, maxval=200, group=g3,
                tooltip="FVG plus vieux que cette limite sont supprimés.")
-fvg_min_atr  = input.float(0.5,  "Taille min FVG (× ATR)",   minval=0.1, maxval=5, step=0.1, group=g3,
-               tooltip="Évite les micro-gaps. 0.5 ATR = ~10 pips AUDUSD M15.")
+fvg_min_atr  = input.float(0.3,  "Taille min FVG (× ATR)",   minval=0.1, maxval=5, step=0.1, group=g3,
+               tooltip="0.3 ATR = ~6 pips AUDUSD M15. Baisse si trop peu de FVG.")
 show_fvg     = input.bool(true,  "Afficher boîtes FVG", group=g3)
 
 g4 = "── Rejection Zone ──"
 use_rej_zone = input.bool(true,  "Activer confluence Rejection Zone", group=g4,
                tooltip="Zone où le prix a fait un gros mouvement impulsif. Le bas/haut de l'impulse = zone clé.")
-rej_impulse  = input.float(2.0,  "Impulse min pour créer zone (× ATR)", minval=1, maxval=10, step=0.1, group=g4,
-               tooltip="Mouvement d'au moins 2× ATR en 1 bougie = impulse = rejection zone créée.")
+rej_impulse  = input.float(1.5,  "Impulse min pour créer zone (× ATR)", minval=0.5, maxval=10, step=0.1, group=g4,
+               tooltip="1.5× ATR = bougie impulsive. Baisse si trop peu de zones.")
 rej_zone_bars= input.int(100,    "Mémoire zones (barres max)", minval=20, maxval=500, group=g4)
 show_rej     = input.bool(true,  "Afficher Rejection Zones", group=g4)
 
@@ -328,21 +332,16 @@ retest_sell = not na(nw_sel_hi) and age_sell >= 1 and age_sell <= retest_bars an
 // ============================================================================
 // CONFLUENCE CHECK
 // ============================================================================
-// Un signal est émis SEULEMENT si le retest coincide avec :
-//   - un Gap Fill (FVG) actif, OU
-//   - une Rejection Zone active
-// C'est ça qui explique pourquoi tu rentres sur CERTAINS nowicks et pas d'autres.
+// conf_and = false (défaut) → FVG OU Rejection = signal  (recommandé)
+// conf_and = true           → FVG ET Rejection obligatoires (très strict)
 
-bull_confluence = (not use_fvg      or price_in_bull_fvg) and
-                  (not use_rej_zone or price_in_bull_rej)
+bull_confluence = conf_and
+                  ? ((not use_fvg or price_in_bull_fvg) and (not use_rej_zone or price_in_bull_rej))
+                  : (price_in_bull_fvg or price_in_bull_rej)
 
-bear_confluence = (not use_fvg      or price_in_bear_fvg) and
-                  (not use_rej_zone or price_in_bear_rej)
-
-// Mode "au moins 1 confluence" (moins strict, plus de trades)
-// Commenter les lignes ci-dessus et décommenter celles-ci si tu veux relaxer :
-// bull_confluence = price_in_bull_fvg or price_in_bull_rej
-// bear_confluence = price_in_bear_fvg or price_in_bear_rej
+bear_confluence = conf_and
+                  ? ((not use_fvg or price_in_bear_fvg) and (not use_rej_zone or price_in_bear_rej))
+                  : (price_in_bear_fvg or price_in_bear_rej)
 
 // ── SIGNAUX FINAUX ────────────────────────────────────────────────────────────
 buy_sig  = retest_buy  and bull_confluence and sess_ok
