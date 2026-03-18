@@ -451,8 +451,8 @@ plotshape(valid_bull and bull_pin and not bull_nw, "Pin Bull", shape.circle, loc
 plotshape(valid_bear and bear_pin and not bear_nw, "Pin Bear", shape.circle, location.abovebar, color.new(color.orange, 30), size=size.tiny)
 
 // EMAs et SMA
-plot(ema1,                  "EMA " + str.tostring(ema1_len), color.new(color.aqua,   50), 1)
-plot(ema2,                  "EMA " + str.tostring(ema2_len), color.new(color.purple, 50), 1)
+plot(ema1,                  "EMA 21", color.new(color.aqua,   50), 1)
+plot(ema2,                  "EMA 50", color.new(color.purple, 50), 1)
 plot(use_sma ? sma200 : na, "SMA 200",                       color.new(color.yellow, 30), 2)
 
 // ============================================================================
