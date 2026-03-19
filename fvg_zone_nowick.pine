@@ -1,10 +1,11 @@
 // ============================================================================
-// FVG · Zone Clé · Nowick — Strict v1 | Brad.fx
+// FVG · Zone Clé · Nowick — Strict v1.1 | Brad.fx
 // Indicateur Pine Script v5 — TradingView
 //
 // LOGIQUE COMPLÈTE (toutes les conditions simultanées) :
 //  1. Impulsion forte (corps ≥ X×ATR) qui crée un FVG (gap 3 bougies)
-//  2. Zone clé confirmée : multi-touch (≥2 fois) OU consolidation serrée
+//     → Si le prix retouche la zone FVG dans les 3 barres suivantes : faux FVG, annulé
+//  2. Zone clé confirmée : consolidation serrée (multi-touch optionnel, désactivé par défaut)
 //  3. Bougie wickless dans le sens du trade sur cette zone
 //  4. Entry : retest du 3/4 du corps de la wickless
 //  5. TP : bord du FVG | SL : sous/sur la wickless | RR ≥ 2.0 obligatoire
@@ -41,18 +42,20 @@ fvg_max_age  = input.int(60,     "FVG max age (barres)",     group=g_fvg, minval
 show_fvg     = input.bool(true,  "Afficher zones FVG",       group=g_fvg)
 
 g_zone = "── Zone Clé ──"
-zone_lb      = input.int(80,     "Lookback touches (barres)", group=g_zone,
-               minval=10, maxval=300,
-               tooltip="Fenêtre de recherche pour les touches précédentes.")
-zone_min_t   = input.int(2,      "Touches min",               group=g_zone, minval=1, maxval=6,
-               tooltip="Zone valide si ce niveau a été testé ≥ N fois dans le lookback.")
-zone_tol     = input.float(0.4,  "Tolérance zone (× ATR)",   group=g_zone,
-               minval=0.05, maxval=2.0, step=0.05,
-               tooltip="Distance max entre le niveau et un high/low historique.")
 use_consol   = input.bool(true,  "Consolidation = zone OK",   group=g_zone,
                tooltip="Si les 5 bougies avant la nowick sont dans un range serré, c'est une zone valide.")
 consol_range = input.float(1.5,  "Range consol max (× ATR)", group=g_zone,
                minval=0.2, maxval=5.0, step=0.1)
+use_mt       = input.bool(false, "Multi-touch actif (optionnel)", group=g_zone,
+               tooltip="Désactivé par défaut : le trader identifie les zones manuellement. Activer pour un filtre auto multi-touch.")
+zone_lb      = input.int(80,     "  └ Lookback (barres)",     group=g_zone,
+               minval=10, maxval=300,
+               tooltip="Fenêtre de recherche pour les touches précédentes (si multi-touch activé).")
+zone_min_t   = input.int(2,      "  └ Touches min",           group=g_zone, minval=1, maxval=6,
+               tooltip="Zone valide si ce niveau a été testé ≥ N fois (si multi-touch activé).")
+zone_tol     = input.float(0.4,  "  └ Tolérance (× ATR)",    group=g_zone,
+               minval=0.05, maxval=2.0, step=0.05,
+               tooltip="Distance max entre le niveau et un high/low historique (si multi-touch activé).")
 
 g_entry = "── Entrée / RR ──"
 entry_win    = input.int(8,      "Fenêtre retest NW (barres)", group=g_entry, minval=1, maxval=30,
@@ -124,14 +127,19 @@ if new_bear_fvg
     nfvg_b  := bar_index
 
 // Expiration : trop vieux OU price a déjà comblé le FVG (fermé au-delà)
+// Faux FVG    : price retouche la zone du FVG dans les 3 barres suivantes → annulé
 if not na(bfvg_b)
-    if (bar_index - bfvg_b) > fvg_max_age or close > bfvg_hi
+    age_b = bar_index - bfvg_b
+    quick_retest_bull = age_b > 0 and age_b <= 3 and low <= bfvg_hi
+    if age_b > fvg_max_age or close > bfvg_hi or quick_retest_bull
         bfvg_lo := na
         bfvg_hi := na
         bfvg_b  := na
 
 if not na(nfvg_b)
-    if (bar_index - nfvg_b) > fvg_max_age or close < nfvg_lo
+    age_n = bar_index - nfvg_b
+    quick_retest_bear = age_n > 0 and age_n <= 3 and high >= nfvg_lo
+    if age_n > fvg_max_age or close < nfvg_lo or quick_retest_bear
         nfvg_lo := na
         nfvg_hi := na
         nfvg_b  := na
@@ -175,10 +183,10 @@ tol_v = atr * zone_tol
 // — BULL SETUP —
 // a) Nowick haussière
 // b) FVG haussier actif AU-DESSUS du prix courant (cible du trade)
-// c) Zone clé confirmée sous la nowick (support multi-touch ou consolidation)
+// c) Zone clé confirmée sous la nowick (consolidation serrée, ou multi-touch si activé)
 // d) SMA200 + session
 bull_fvg_ok  = not na(bfvg_lo) and bfvg_lo > close
-bull_zone_mt = f_touch_count(low, tol_v, zone_lb) >= zone_min_t
+bull_zone_mt = use_mt and f_touch_count(low, tol_v, zone_lb) >= zone_min_t
 bull_zone_cl = use_consol and f_is_consolidation(5, atr * consol_range)
 bull_on_zone = bull_zone_mt or bull_zone_cl
 sma_ok_bull  = not use_sma or close > sma200
@@ -188,10 +196,10 @@ bull_setup   = bull_nw and bull_fvg_ok and bull_on_zone and sma_ok_bull and sess
 // — BEAR SETUP —
 // a) Nowick baissière
 // b) FVG baissier actif EN-DESSOUS du prix courant (cible du trade)
-// c) Zone clé confirmée sur la nowick (résistance multi-touch ou consolidation)
+// c) Zone clé confirmée sur la nowick (consolidation, ou multi-touch si activé)
 // d) SMA200 + session
 bear_fvg_ok  = not na(nfvg_hi) and nfvg_hi < close
-bear_zone_mt = f_touch_count(high, tol_v, zone_lb) >= zone_min_t
+bear_zone_mt = use_mt and f_touch_count(high, tol_v, zone_lb) >= zone_min_t
 bear_zone_cl = use_consol and f_is_consolidation(5, atr * consol_range)
 bear_on_zone = bear_zone_mt or bear_zone_cl
 sma_ok_bear  = not use_sma or close < sma200
@@ -507,7 +515,7 @@ if barstate.islast
 
     // Filtres actifs
     f_str = (use_sma  ? "SMA200 " : "") + (use_sess  ? "SESSION " : "") +
-            (use_consol ? "CONSOL" : "")
+            (use_consol ? "CONSOL " : "") + (use_mt ? "MT" : "")
     table.cell(t, 0, 7, "Filtres",  text_color=c_w, text_size=size.tiny)
     table.cell(t, 1, 7, f_str,      text_color=c_a, text_size=size.tiny)
 
