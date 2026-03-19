@@ -1,0 +1,516 @@
+// ============================================================================
+// FVG · Zone Clé · Nowick — Strict v1 | Brad.fx
+// Indicateur Pine Script v5 — TradingView
+//
+// LOGIQUE COMPLÈTE (toutes les conditions simultanées) :
+//  1. Impulsion forte (corps ≥ X×ATR) qui crée un FVG (gap 3 bougies)
+//  2. Zone clé confirmée : multi-touch (≥2 fois) OU consolidation serrée
+//  3. Bougie wickless dans le sens du trade sur cette zone
+//  4. Entry : retest du 3/4 du corps de la wickless
+//  5. TP : bord du FVG | SL : sous/sur la wickless | RR ≥ 2.0 obligatoire
+//
+// Alertes dynamiques via alert() (valeurs réelles) + alertcondition (webhook)
+// ============================================================================
+
+//@version=5
+indicator("FVG · Zone · Nowick — Strict v1",
+          overlay=true,
+          max_labels_count=200,
+          max_lines_count=200,
+          max_boxes_count=50)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+g_nw = "── Nowick ──"
+wick_pct     = input.float(8.0,  "Mèche max (% corps)",     group=g_nw,
+               minval=1.0, maxval=25.0, step=1.0,
+               tooltip="8% = mèche ≤ 8% du corps. Baisser à 5% pour ultra-strict.")
+min_body_atr = input.float(0.5,  "Corps min (× ATR)",        group=g_nw,
+               minval=0.1, maxval=3.0, step=0.1,
+               tooltip="Filtre les micro-bougies. 0.5 = corps ≥ 0.5×ATR14.")
+atr_len      = input.int(14,     "ATR length",                group=g_nw, minval=5, maxval=50)
+
+g_fvg = "── FVG / Impulsion ──"
+impulse_mult = input.float(1.2,  "Impulsion min (× ATR)",   group=g_fvg,
+               minval=0.3, maxval=5.0, step=0.1,
+               tooltip="Corps de la bougie centrale du FVG ≥ X×ATR.")
+fvg_max_age  = input.int(60,     "FVG max age (barres)",     group=g_fvg, minval=5, maxval=300,
+               tooltip="FVG ignoré après N barres si aucun trade n'a été pris.")
+show_fvg     = input.bool(true,  "Afficher zones FVG",       group=g_fvg)
+
+g_zone = "── Zone Clé ──"
+zone_lb      = input.int(80,     "Lookback touches (barres)", group=g_zone,
+               minval=10, maxval=300,
+               tooltip="Fenêtre de recherche pour les touches précédentes.")
+zone_min_t   = input.int(2,      "Touches min",               group=g_zone, minval=1, maxval=6,
+               tooltip="Zone valide si ce niveau a été testé ≥ N fois dans le lookback.")
+zone_tol     = input.float(0.4,  "Tolérance zone (× ATR)",   group=g_zone,
+               minval=0.05, maxval=2.0, step=0.05,
+               tooltip="Distance max entre le niveau et un high/low historique.")
+use_consol   = input.bool(true,  "Consolidation = zone OK",   group=g_zone,
+               tooltip="Si les 5 bougies avant la nowick sont dans un range serré, c'est une zone valide.")
+consol_range = input.float(1.5,  "Range consol max (× ATR)", group=g_zone,
+               minval=0.2, maxval=5.0, step=0.1)
+
+g_entry = "── Entrée / RR ──"
+entry_win    = input.int(8,      "Fenêtre retest NW (barres)", group=g_entry, minval=1, maxval=30,
+               tooltip="Barres max après la nowick pour que le retest du 3/4 arrive. Au-delà : signal annulé.")
+sl_buf       = input.float(0.2,  "SL buffer (× ATR)",          group=g_entry,
+               minval=0.0, maxval=2.0, step=0.05,
+               tooltip="Buffer ajouté sous/sur la nowick pour le SL.")
+rr_min       = input.float(2.0,  "RR minimum requis",           group=g_entry, minval=1.0, maxval=10.0, step=0.5,
+               tooltip="Signal ignoré si le RR calculé est < cette valeur.")
+use_fvg_tp   = input.bool(true,  "TP = bord du FVG",            group=g_entry,
+               tooltip="TP fixé sur le bas du FVG bull / haut du FVG bear. Sinon : RR fixe.")
+tp_fixed_rr  = input.float(2.0,  "RR fixe (si FVG TP désactivé)", group=g_entry, minval=1.0, step=0.5)
+
+g_filt = "── Filtres ──"
+use_sma      = input.bool(true,  "SMA 200 (tendance)",  group=g_filt,
+               tooltip="BUY uniquement si close > SMA200. SELL si close < SMA200.")
+use_sess     = input.bool(true,  "Session UTC",          group=g_filt)
+sess_start   = input.int(6,      "Début UTC",            group=g_filt, minval=0, maxval=23)
+sess_end     = input.int(20,     "Fin UTC",              group=g_filt, minval=1, maxval=23)
+cooldown_b   = input.int(15,     "Cooldown (barres)",    group=g_filt, minval=1, maxval=200,
+               tooltip="Barres minimum entre deux signaux dans la même direction.")
+
+// ============================================================================
+// BASE
+// ============================================================================
+atr     = ta.atr(atr_len)
+sma200  = ta.sma(close, 200)
+body    = math.abs(close - open)
+up_wick = high - math.max(open, close)
+dn_wick = math.min(open, close) - low
+bar_h   = hour(time, "UTC")
+sess_ok = not use_sess or (bar_h >= sess_start and bar_h < sess_end)
+
+// ============================================================================
+// 1. DÉTECTION FVG (gap 3 bougies + impulsion forte sur [1])
+//
+//  Bull FVG : low[0] > high[2]  et  bougie[1] est haussière forte
+//  Bear FVG : high[0] < low[2]  et  bougie[1] est baissière forte
+//
+//  Pour le BUY : après l'impulsion haussière, prix pull-back sous le FVG
+//                → on entre depuis zone clé → TP = bas du FVG (=high[2])
+//  Pour le SELL: après l'impulsion baissière, prix pull-back sur zone clé
+//                → on entre → TP = haut du FVG (=low[2])
+// ============================================================================
+b1_body         = math.abs(close[1] - open[1])
+strong_bull_imp = close[1] > open[1] and b1_body >= atr[1] * impulse_mult
+strong_bear_imp = close[1] < open[1] and b1_body >= atr[1] * impulse_mult
+
+new_bull_fvg = strong_bull_imp and low  > high[2]
+new_bear_fvg = strong_bear_imp and high < low[2]
+
+// Stockage du FVG actif le plus récent de chaque type
+var float bfvg_lo = na   // bull FVG : bas  = high[2] au moment de la détection
+var float bfvg_hi = na   // bull FVG : haut = low[0]  au moment de la détection
+var int   bfvg_b  = na
+
+var float nfvg_lo = na   // bear FVG : bas  = high[0] au moment de la détection
+var float nfvg_hi = na   // bear FVG : haut = low[2]  au moment de la détection
+var int   nfvg_b  = na
+
+if new_bull_fvg
+    bfvg_lo := high[2]
+    bfvg_hi := low
+    bfvg_b  := bar_index
+
+if new_bear_fvg
+    nfvg_lo := high
+    nfvg_hi := low[2]
+    nfvg_b  := bar_index
+
+// Expiration : trop vieux OU price a déjà comblé le FVG (fermé au-delà)
+if not na(bfvg_b)
+    if (bar_index - bfvg_b) > fvg_max_age or close > bfvg_hi
+        bfvg_lo := na
+        bfvg_hi := na
+        bfvg_b  := na
+
+if not na(nfvg_b)
+    if (bar_index - nfvg_b) > fvg_max_age or close < nfvg_lo
+        nfvg_lo := na
+        nfvg_hi := na
+        nfvg_b  := na
+
+// ============================================================================
+// 2. FONCTIONS ZONE CLÉ
+// ============================================================================
+
+// Compte le nombre de barres historiques dont high ou low est proche du niveau
+f_touch_count(float level, float tol_val, int lb) =>
+    int cnt = 0
+    for i = 1 to lb
+        if math.abs(high[i] - level) <= tol_val or math.abs(low[i] - level) <= tol_val
+            cnt += 1
+    cnt
+
+// Vérifie si les N bougies précédentes sont dans un range serré (consolidation)
+// [1] décalage pour exclure la bougie nowick courante
+f_is_consolidation(int n, float max_rng) =>
+    h = ta.highest(high, n)[1]
+    l = ta.lowest(low,   n)[1]
+    (h - l) <= max_rng
+
+// ============================================================================
+// 3. DÉTECTION NOWICK
+//
+//  Bull nowick : bougie verte + mèche basse ≤ wick_pct% du corps + corps suffisant
+//  Bear nowick : bougie rouge + mèche haute ≤ wick_pct% du corps + corps suffisant
+// ============================================================================
+thresh  = body * (wick_pct / 100.0)
+big_bod = body >= atr * min_body_atr
+
+bull_nw = close > open and dn_wick <= thresh and big_bod
+bear_nw = close < open and up_wick <= thresh and big_bod
+
+// ============================================================================
+// 4. SETUP COMPLET (les 3 couches doivent être vraies simultanément)
+// ============================================================================
+tol_v = atr * zone_tol
+
+// — BULL SETUP —
+// a) Nowick haussière
+// b) FVG haussier actif AU-DESSUS du prix courant (cible du trade)
+// c) Zone clé confirmée sous la nowick (support multi-touch ou consolidation)
+// d) SMA200 + session
+bull_fvg_ok  = not na(bfvg_lo) and bfvg_lo > close
+bull_zone_mt = f_touch_count(low, tol_v, zone_lb) >= zone_min_t
+bull_zone_cl = use_consol and f_is_consolidation(5, atr * consol_range)
+bull_on_zone = bull_zone_mt or bull_zone_cl
+sma_ok_bull  = not use_sma or close > sma200
+
+bull_setup   = bull_nw and bull_fvg_ok and bull_on_zone and sma_ok_bull and sess_ok
+
+// — BEAR SETUP —
+// a) Nowick baissière
+// b) FVG baissier actif EN-DESSOUS du prix courant (cible du trade)
+// c) Zone clé confirmée sur la nowick (résistance multi-touch ou consolidation)
+// d) SMA200 + session
+bear_fvg_ok  = not na(nfvg_hi) and nfvg_hi < close
+bear_zone_mt = f_touch_count(high, tol_v, zone_lb) >= zone_min_t
+bear_zone_cl = use_consol and f_is_consolidation(5, atr * consol_range)
+bear_on_zone = bear_zone_mt or bear_zone_cl
+sma_ok_bear  = not use_sma or close < sma200
+
+bear_setup   = bear_nw and bear_fvg_ok and bear_on_zone and sma_ok_bear and sess_ok
+
+// ============================================================================
+// 5. SETUP PENDING → ATTENTE DU RETEST AU 3/4
+//
+//  Après une nowick valide, le niveau d'entrée = 3/4 du corps de la nowick.
+//  Bull nowick (verte) : body_bottom = open  → entry = open + 0.75 × corps
+//  Bear nowick (rouge) : body_top    = open  → entry = open - 0.75 × corps
+//
+//  Le signal se déclenche quand price retouche ce niveau après la nowick.
+// ============================================================================
+var float pb_entry = na
+var float pb_sl    = na
+var float pb_tp    = na
+var float pb_nw_lo = na   // low de la nowick bull (invalidation si close en dessous)
+var int   pb_b     = na
+
+var float ps_entry = na
+var float ps_sl    = na
+var float ps_tp    = na
+var float ps_nw_hi = na   // high de la nowick bear (invalidation si close au-dessus)
+var int   ps_b     = na
+
+var int last_buy_bar  = -1000
+var int last_sell_bar = -1000
+
+// — Nouveau bull setup → remplace le pending —
+if bull_setup and (bar_index - last_buy_bar) >= cooldown_b
+    nw_body_sz = close - open
+    entry_lv   = open + nw_body_sz * 0.75      // 3/4 depuis le bas du corps
+    sl_lv      = low - atr * sl_buf
+    risk_lv    = entry_lv - sl_lv
+    tp_lv      = use_fvg_tp and not na(bfvg_lo) and bfvg_lo > entry_lv
+                 ? bfvg_lo
+                 : entry_lv + risk_lv * tp_fixed_rr
+    rr_ok      = risk_lv > 0.0 and (tp_lv - entry_lv) / risk_lv >= rr_min
+    if rr_ok
+        pb_entry := entry_lv
+        pb_sl    := sl_lv
+        pb_tp    := tp_lv
+        pb_nw_lo := low
+        pb_b     := bar_index
+
+// — Nouveau bear setup → remplace le pending —
+if bear_setup and (bar_index - last_sell_bar) >= cooldown_b
+    nw_body_sz = open - close
+    entry_lv   = open - nw_body_sz * 0.75      // 3/4 depuis le haut du corps
+    sl_lv      = high + atr * sl_buf
+    risk_lv    = sl_lv - entry_lv
+    tp_lv      = use_fvg_tp and not na(nfvg_hi) and nfvg_hi < entry_lv
+                 ? nfvg_hi
+                 : entry_lv - risk_lv * tp_fixed_rr
+    rr_ok      = risk_lv > 0.0 and (entry_lv - tp_lv) / risk_lv >= rr_min
+    if rr_ok
+        ps_entry := entry_lv
+        ps_sl    := sl_lv
+        ps_tp    := tp_lv
+        ps_nw_hi := high
+        ps_b     := bar_index
+
+// — Expiration (fenêtre retest dépassée) —
+if not na(pb_b) and (bar_index - pb_b) > entry_win
+    pb_entry := na
+    pb_sl    := na
+    pb_tp    := na
+    pb_nw_lo := na
+    pb_b     := na
+
+if not na(ps_b) and (bar_index - ps_b) > entry_win
+    ps_entry := na
+    ps_sl    := na
+    ps_tp    := na
+    ps_nw_hi := na
+    ps_b     := na
+
+// — Invalidation (close perce la nowick = momentum annulé) —
+if not na(pb_nw_lo) and close < pb_nw_lo
+    pb_entry := na
+    pb_sl    := na
+    pb_tp    := na
+    pb_nw_lo := na
+    pb_b     := na
+
+if not na(ps_nw_hi) and close > ps_nw_hi
+    ps_entry := na
+    ps_sl    := na
+    ps_tp    := na
+    ps_nw_hi := na
+    ps_b     := na
+
+// ============================================================================
+// 6. DÉCLENCHEMENT (retest du 3/4)
+//    Capturer les valeurs AVANT consommation pour labels + alertes
+// ============================================================================
+pb_e = pb_entry
+pb_s = pb_sl
+pb_t = pb_tp
+
+ps_e = ps_entry
+ps_s = ps_sl
+ps_t = ps_tp
+
+// BUY  : price revient sur le niveau 3/4 (low touche) et ferme au-dessus
+buy_sig  = not na(pb_entry) and pb_b < bar_index and
+           low <= pb_entry and close >= pb_entry
+
+// SELL : price remonte sur le niveau 3/4 (high touche) et ferme en dessous
+sell_sig = not na(ps_entry) and ps_b < bar_index and
+           high >= ps_entry and close <= ps_entry
+
+if buy_sig
+    last_buy_bar := bar_index
+    pb_entry := na
+    pb_sl    := na
+    pb_tp    := na
+    pb_nw_lo := na
+    pb_b     := na
+
+if sell_sig
+    last_sell_bar := bar_index
+    ps_entry := na
+    ps_sl    := na
+    ps_tp    := na
+    ps_nw_hi := na
+    ps_b     := na
+
+// ============================================================================
+// 7. RR CALCULÉ POUR LES ALERTES
+// ============================================================================
+rr_buy  = buy_sig  and not na(pb_e) and not na(pb_s) and (pb_e - pb_s) > 0
+          ? math.round((pb_t - pb_e) / (pb_e - pb_s), 2) : 0.0
+rr_sell = sell_sig and not na(ps_e) and not na(ps_s) and (ps_s - ps_e) > 0
+          ? math.round((ps_e - ps_t) / (ps_s - ps_e), 2) : 0.0
+
+// ============================================================================
+// 8. ALERTES
+//    alert()         → message dynamique (valeurs réelles) pour webhook
+//    alertcondition  → condition statique (backup TradingView natif)
+// ============================================================================
+if buy_sig
+    alert(
+      "🟢 BUY " + syminfo.ticker + "\n" +
+      "TF     : " + timeframe.period + "m\n" +
+      "Entry  : " + str.tostring(pb_e, format.mintick) + "\n" +
+      "TP     : " + str.tostring(pb_t, format.mintick) + "\n" +
+      "SL     : " + str.tostring(pb_s, format.mintick) + "\n" +
+      "RR     : 1:" + str.tostring(rr_buy) + "\n" +
+      "Heure  : " + str.format_time(time, "dd/MM HH:mm", "UTC") + " UTC\n" +
+      "Setup  : FVG · Zone · Nowick 3/4",
+      alert.freq_once_per_bar_close)
+
+if sell_sig
+    alert(
+      "🔴 SELL " + syminfo.ticker + "\n" +
+      "TF     : " + timeframe.period + "m\n" +
+      "Entry  : " + str.tostring(ps_e, format.mintick) + "\n" +
+      "TP     : " + str.tostring(ps_t, format.mintick) + "\n" +
+      "SL     : " + str.tostring(ps_s, format.mintick) + "\n" +
+      "RR     : 1:" + str.tostring(rr_sell) + "\n" +
+      "Heure  : " + str.format_time(time, "dd/MM HH:mm", "UTC") + " UTC\n" +
+      "Setup  : FVG · Zone · Nowick 3/4",
+      alert.freq_once_per_bar_close)
+
+alertcondition(buy_sig,  "BUY  — FVG+Zone+Nowick", "BUY {{ticker}} | FVG·Zone·Nowick 3/4 retest")
+alertcondition(sell_sig, "SELL — FVG+Zone+Nowick", "SELL {{ticker}} | FVG·Zone·Nowick 3/4 retest")
+
+// ============================================================================
+// 9. VISUELS
+// ============================================================================
+
+// SMA 200
+plot(use_sma ? sma200 : na, "SMA 200", color.new(color.yellow, 30), 2)
+
+// Nowick brutes (tous les nowicks détectés, même sans FVG/zone)
+plotshape(bull_nw, "NW Bull raw", shape.triangleup,
+          location.belowbar, color.new(color.lime, 75), size=size.tiny)
+plotshape(bear_nw, "NW Bear raw", shape.triangledown,
+          location.abovebar, color.new(color.red,  75), size=size.tiny)
+
+// Setup complet confirmé (nowick + FVG + zone — 3 couches)
+plotshape(bull_setup, "Setup Bull ✓", shape.triangleup,
+          location.belowbar, color.lime, size=size.small)
+plotshape(bear_setup, "Setup Bear ✓", shape.triangledown,
+          location.abovebar, color.red,  size=size.small)
+
+// Niveau d'entrée pending (ligne horizontale sur le niveau 3/4)
+plot(not na(pb_entry) ? pb_entry : na, "Entry BUY  pending",
+     color.new(color.green, 30), 1, plot.style_linebr)
+plot(not na(ps_entry) ? ps_entry : na, "Entry SELL pending",
+     color.new(color.red,   30), 1, plot.style_linebr)
+
+// FVG boxes (zone cible)
+var box bfvg_box = na
+var box nfvg_box = na
+
+if show_fvg
+    if new_bull_fvg
+        box.delete(bfvg_box)
+        bfvg_box := box.new(bar_index - 2, low, bar_index + 5, high[2],
+                            border_color = color.new(color.lime, 50),
+                            bgcolor      = color.new(color.lime, 88),
+                            text         = "FVG ▲",
+                            text_color   = color.new(color.lime, 20),
+                            text_size    = size.tiny)
+    if new_bear_fvg
+        box.delete(nfvg_box)
+        nfvg_box := box.new(bar_index - 2, low[2], bar_index + 5, high,
+                            border_color = color.new(color.red, 50),
+                            bgcolor      = color.new(color.red, 88),
+                            text         = "FVG ▼",
+                            text_color   = color.new(color.red, 20),
+                            text_size    = size.tiny)
+    // Étendre la box jusqu'au présent tant que le FVG est actif
+    if not na(bfvg_b) and not na(bfvg_box)
+        box.set_right(bfvg_box, bar_index + 3)
+    if not na(nfvg_b) and not na(nfvg_box)
+        box.set_right(nfvg_box, bar_index + 3)
+
+// Labels + lignes sur signal final
+if buy_sig
+    label.new(bar_index, low - atr * 0.8,
+              "▲ BUY\n" +
+              "Entry " + str.tostring(pb_e, "#.#####") + "\n" +
+              "TP    " + str.tostring(pb_t, "#.#####") + "\n" +
+              "SL    " + str.tostring(pb_s, "#.#####") + "\n" +
+              "RR    1:" + str.tostring(rr_buy),
+              yloc      = yloc.price,
+              style     = label.style_label_up,
+              color     = color.new(color.green, 5),
+              textcolor = color.white,
+              size      = size.small)
+    line.new(bar_index, pb_t, bar_index + 60, pb_t,
+             color=color.new(color.lime, 10), width=2, style=line.style_dashed)
+    line.new(bar_index, pb_e, bar_index + 60, pb_e,
+             color=color.new(color.white, 40), width=1, style=line.style_dotted)
+    line.new(bar_index, pb_s, bar_index + 60, pb_s,
+             color=color.new(color.red, 10),  width=2, style=line.style_dashed)
+
+if sell_sig
+    label.new(bar_index, high + atr * 0.8,
+              "▼ SELL\n" +
+              "Entry " + str.tostring(ps_e, "#.#####") + "\n" +
+              "TP    " + str.tostring(ps_t, "#.#####") + "\n" +
+              "SL    " + str.tostring(ps_s, "#.#####") + "\n" +
+              "RR    1:" + str.tostring(rr_sell),
+              yloc      = yloc.price,
+              style     = label.style_label_down,
+              color     = color.new(color.red, 5),
+              textcolor = color.white,
+              size      = size.small)
+    line.new(bar_index, ps_t, bar_index + 60, ps_t,
+             color=color.new(color.lime, 10), width=2, style=line.style_dashed)
+    line.new(bar_index, ps_e, bar_index + 60, ps_e,
+             color=color.new(color.white, 40), width=1, style=line.style_dotted)
+    line.new(bar_index, ps_s, bar_index + 60, ps_s,
+             color=color.new(color.red, 10),  width=2, style=line.style_dashed)
+
+// ============================================================================
+// 10. TABLE DE STATUT
+// ============================================================================
+if barstate.islast
+    var table t = table.new(position.top_right, 2, 9,
+                  bgcolor      = color.new(color.black, 80),
+                  border_color = color.new(color.gray,  60),
+                  border_width = 1)
+
+    c_w = color.white
+    c_g = color.lime
+    c_r = color.red
+    c_y = color.yellow
+    c_a = color.aqua
+    sz  = size.small
+
+    table.cell(t, 0, 0, "FVG·Zone·Nowick",
+               text_color=c_y, text_size=sz,
+               bgcolor=color.new(color.navy, 20), text_halign=text.align_center)
+    table.cell(t, 1, 0, "STRICT v1",
+               text_color=c_a, text_size=sz,
+               bgcolor=color.new(color.navy, 20), text_halign=text.align_center)
+
+    // FVG actifs
+    bst = not na(bfvg_lo) ? "▲ " + str.tostring(bfvg_lo, "#.####") +
+                             " → " + str.tostring(bfvg_hi, "#.####") : "—"
+    nst = not na(nfvg_lo) ? "▼ " + str.tostring(nfvg_hi, "#.####") +
+                             " → " + str.tostring(nfvg_lo, "#.####") : "—"
+    table.cell(t, 0, 1, "FVG Bull",  text_color=c_w, text_size=sz)
+    table.cell(t, 1, 1, bst, text_color=not na(bfvg_lo) ? c_g : color.gray, text_size=sz)
+    table.cell(t, 0, 2, "FVG Bear",  text_color=c_w, text_size=sz)
+    table.cell(t, 1, 2, nst, text_color=not na(nfvg_lo) ? c_r : color.gray, text_size=sz)
+
+    // Pending setups
+    pb_st = not na(pb_b) ? "BUY 3/4 @" + str.tostring(pb_entry, "#.####") +
+                            " (" + str.tostring(bar_index - pb_b) + "b)" : "—"
+    ps_st = not na(ps_b) ? "SELL 3/4 @" + str.tostring(ps_entry, "#.####") +
+                            " (" + str.tostring(bar_index - ps_b) + "b)" : "—"
+    table.cell(t, 0, 3, "Pending BUY",  text_color=c_w, text_size=sz)
+    table.cell(t, 1, 3, pb_st, text_color=not na(pb_b) ? c_g : color.gray, text_size=size.tiny)
+    table.cell(t, 0, 4, "Pending SELL", text_color=c_w, text_size=sz)
+    table.cell(t, 1, 4, ps_st, text_color=not na(ps_b) ? c_r : color.gray, text_size=size.tiny)
+
+    // Trend + session
+    trend_str = close > sma200 ? "▲ BULL" : "▼ BEAR"
+    table.cell(t, 0, 5, "Trend SMA200", text_color=c_w, text_size=sz)
+    table.cell(t, 1, 5, trend_str,
+               text_color=close > sma200 ? c_g : c_r, text_size=sz)
+    table.cell(t, 0, 6, "Session",      text_color=c_w, text_size=sz)
+    table.cell(t, 1, 6, sess_ok ? "OPEN ✓" : "FERMÉE",
+               text_color=sess_ok ? c_g : color.gray, text_size=sz)
+
+    // Filtres actifs
+    f_str = (use_sma  ? "SMA200 " : "") + (use_sess  ? "SESSION " : "") +
+            (use_consol ? "CONSOL" : "")
+    table.cell(t, 0, 7, "Filtres",  text_color=c_w, text_size=size.tiny)
+    table.cell(t, 1, 7, f_str,      text_color=c_a, text_size=size.tiny)
+
+    // Légende des visuels
+    table.cell(t, 0, 8, "△ = NW brute",         text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 8, "▲ = Setup 3 couches",  text_color=c_g, text_size=size.tiny)
